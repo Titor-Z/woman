@@ -12,23 +12,7 @@ env:
 
 jobs:
   build:
-    strategy:
-      matrix:
-        include:
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
-            artifact: woman-x64-windows.exe
-            ext: .exe
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-            artifact: woman-x64-linux
-            ext: ''
-          - os: macos-latest
-            target: aarch64-apple-darwin
-            artifact: woman-arm-mac
-            ext: ''
-
-    runs-on: ${{ matrix.os }}
+    runs-on: windows-latest
 
     steps:
       - uses: actions/checkout@v4
@@ -36,13 +20,12 @@ jobs:
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           toolchain: stable
-          target: ${{ matrix.target }}
           cache: true
 
-      - run: cargo build --release --target ${{ matrix.target }}
+      - run: cargo build --release
 
       - uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.artifact }}
-          path: target/${{ matrix.target }}/release/woman${{ matrix.ext }}
+          name: woman-x64-windows.exe
+          path: target/release/woman.exe
           if-no-files-found: error
