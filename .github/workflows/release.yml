@@ -25,7 +25,7 @@ jobs:
         shell: pwsh
         run: |
           $ver = "${{ github.ref_name }}"
-          Move-Item -Path target/release/woman.exe -Target "woman-$ver-x64-windows.exe"
+          Move-Item -Path target/release/woman.exe -Destination "woman-$ver-x64-windows.exe"
 
       - uses: actions/upload-artifact@v4
         with:
