@@ -41,6 +41,7 @@ impl DocMeta {
 pub struct Doc {
     pub meta: DocMeta,
     pub body: String,
+    #[allow(dead_code)]
     pub path: Option<PathBuf>,
 }
 

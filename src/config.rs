@@ -57,6 +57,7 @@ impl Config {
     }
 
     /// cache/ 目录
+    #[allow(dead_code)]
     pub fn cache_dir() -> PathBuf {
         Self::home_dir().join("cache")
     }
