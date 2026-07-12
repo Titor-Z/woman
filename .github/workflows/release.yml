@@ -21,10 +21,16 @@ jobs:
 
       - run: cargo build --release
 
+      - name: Rename binary with version
+        shell: pwsh
+        run: |
+          $ver = "${{ github.ref_name }}"
+          Move-Item -Path target/release/woman.exe -Target "woman-$ver-x64-windows.exe"
+
       - uses: actions/upload-artifact@v4
         with:
-          name: woman-x64-windows.exe
-          path: target/release/woman.exe
+          name: woman-${{ github.ref_name }}-x64-windows.exe
+          path: woman-${{ github.ref_name }}-x64-windows.exe
           if-no-files-found: error
 
   release:
@@ -39,5 +45,5 @@ jobs:
       - name: Create release
         uses: softprops/action-gh-release@v2
         with:
-          files: woman-*/*
+          files: woman-*
           generate_release_notes: true
