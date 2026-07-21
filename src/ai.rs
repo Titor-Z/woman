@@ -1,10 +1,10 @@
 // ai.rs — AI 对话客户端 + 工具调用 + REPL 循环
-// 通过 curl.exe POST 调用 OpenAI 兼容 API，支持函数调用
-// 使用 tools/tool_calls/tool 体系（OpenAI 新格式），兼容旧 function_call/function 格式
+// 通过 curl.exe POST 调用 OpenAI 兼容 API
+// AI 只有一个 bash 工具，所有操作通过 PowerShell 命令完成
 
 use crate::config::{AiProvider, Config};
 use crate::docs::{current_date, find_in_cache, find_in_docs};
-use crate::fetch::{command_exists, fetch_from_archlinux, run_help};
+use crate::fetch::{command_exists, run_help};
 
 use serde::de::Deserializer;
 use serde::{Deserialize, Serialize};
@@ -16,7 +16,6 @@ use crossterm::cursor::{Hide, MoveUp, Show};
 use crossterm::event::{read, Event, KeyCode, KeyEventKind};
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
 use crossterm::execute;
-use std::fs;
 
 // ============================================================
 // 系统提示词
@@ -24,35 +23,35 @@ use std::fs;
 
 const SYSTEM_PROMPT: &str = "\
 你是一个 Windows 命令行助手 woman AI，默认运行在 PowerShell 环境中。
+你只有一个工具 **bash**，所有操作都通过它完成。
+
+## 环境说明
+- 底层 shell：PowerShell（`pwsh -NoProfile -Command`）
+- 本机已安装 GNU coreutils（`C:\\Program Files\\coreutils\\bin\\`），以下命令**必须加 `.exe` 后缀**（PowerShell alias 会拦截 `ls` `cat` 等）：
+  `ls.exe` `cat.exe` `cp.exe` `mv.exe` `rm.exe` `mkdir.exe` `echo.exe`
+- 运行 `coreutils.exe --list-raw` 查看所有支持的命令列表
+- 其他 coreutils 命令可直接使用（如 `grep` `sed` `find` `head` `tail` `wc` 等）
+- 读文件用 `cat.exe`
+- HTTP 请求用 `curl.exe`
+- 查找命令路径用 `where.exe` <name>
 
 ## 优先级（按回答偏好从高到低）
-1. **GNU coreutils** — 本机已安装，命令包括 `ls.exe` `cat.exe` `cp.exe` `mkdir.exe` `rm.exe` 等。回答时优先介绍 coreutils 版本。
+1. **GNU coreutils** — 本机已安装。回答时优先介绍 coreutils 版本。
 2. **自定义命令** — `was`、`unwas`（PowerShell $PROFILE 别名管理）、`woman`（本工具）等，这些是本机特有命令。
 3. **标准 Windows 命令** — `dir` `find` `icacls` 等 cmd.exe 原生命令。
 4. **PowerShell cmdlet** — `Get-ChildItem` `Select-String` 等，优先级最低，仅在用户明确询问或前两者无法覆盖时才回答。
 
 ## 规则
 1. 始终用中文回答
-2. 当用户询问某个命令时，先通过工具获取原始信息，再给出结构化的中文解释
+2. 当用户询问某个命令时，先通过 `bash` 获取原始信息（如 `command --help`、`curl.exe` 抓取在线手册），再给出结构化的中文解释
 3. 解释应包含：用途、基本语法、常用选项、典型示例
-4. 如果用户要求生成或保存手册，使用 save_docs 工具
-5. **终端友好排版**：由于输出在终端渲染，请**避免使用表格和 Markdown 代码块（```）**。推荐用**列表（- 或 1.）、缩进、加粗**来组织内容
-
-## 工具说明
-- run_help(command): 执行命令的 --help，获取原始帮助文本
-- search_online(command): 从 man.archlinux.org 抓取英文手册
-- read_docs(command): 读取本地 docs/ 下已有的手册
-- save_docs(command, content): 保存手册到本地 docs/ 目录
-  content 必须包含 YAML frontmatter，格式：
-  ---
-  title: <命令名>
-  source: ai-generated
-  generated: YYYY-MM-DD
-  ---
-
-## save_docs 使用规范
-- 调用 save_docs 前，必须通过 run_help 或 search_online 获取过原始信息
-- 内容应为结构清晰的 Markdown 文档";
+4. 如果用户要求生成或保存手册，使用 bash 的 echo/重定向写入文件到 `$env:USERPROFILE\\.woman\\docs\\` 目录，内容须包含 YAML frontmatter：
+   ---
+   title: <命令名>
+   source: ai-generated
+   generated: YYYY-MM-DD
+   ---
+5. **终端友好排版**：由于输出在终端渲染，请**避免使用表格和 Markdown 代码块（```）**。推荐用**列表（- 或 1.）、缩进、加粗**来组织内容";
 
 // ============================================================
 // 工具定义（OpenAI tools 格式）
@@ -62,72 +61,17 @@ const TOOLS_JSON: &str = r#"[
   {
     "type": "function",
     "function": {
-      "name": "run_help",
-      "description": "Execute `command --help` on this system to get raw help text. Use this first when user asks about a command.",
+      "name": "bash",
+      "description": "Run a shell command on Windows (PowerShell). Execute any command, script, or program. Returns stdout + stderr.",
       "parameters": {
         "type": "object",
         "properties": {
           "command": {
             "type": "string",
-            "description": "Command name to look up"
+            "description": "The PowerShell command to execute"
           }
         },
         "required": ["command"]
-      }
-    }
-  },
-  {
-    "type": "function",
-    "function": {
-      "name": "search_online",
-      "description": "Fetch the English man page from man.archlinux.org. Use this when --help output is insufficient or the command is not installed locally.",
-      "parameters": {
-        "type": "object",
-        "properties": {
-          "command": {
-            "type": "string",
-            "description": "Command name to search"
-          }
-        },
-        "required": ["command"]
-      }
-    }
-  },
-  {
-    "type": "function",
-    "function": {
-      "name": "read_docs",
-      "description": "Read a previously saved manual from ~/.woman/docs/. Returns the full document if it exists.",
-      "parameters": {
-        "type": "object",
-        "properties": {
-          "command": {
-            "type": "string",
-            "description": "Command name to read"
-          }
-        },
-        "required": ["command"]
-      }
-    }
-  },
-  {
-    "type": "function",
-    "function": {
-      "name": "save_docs",
-      "description": "Save a manual to ~/.woman/docs/. The content must include proper YAML frontmatter (title, source, generated). Only call this after gathering information and with user explicit request.",
-      "parameters": {
-        "type": "object",
-        "properties": {
-          "command": {
-            "type": "string",
-            "description": "Command name (used as filename)"
-          },
-          "content": {
-            "type": "string",
-            "description": "Full document content with YAML frontmatter in Markdown format"
-          }
-        },
-        "required": ["command", "content"]
       }
     }
   }
@@ -180,6 +124,7 @@ struct StreamToolCall {
     #[serde(default)]
     id: Option<String>,
     #[serde(default)]
+    #[allow(dead_code)]
     index: Option<u32>,
     #[serde(default)]
     function: Option<StreamFunction>,
@@ -216,34 +161,6 @@ fn de_arguments<'de, D: Deserializer<'de>>(d: D) -> Result<String, D::Error> {
     }
 }
 
-/// 从纯文本 content 中提取 <|FunctionCallBegin|> 标记（doubao-seed 兼容）
-fn extract_function_call_from_content(content: &str) -> Option<FunctionCall> {
-    let start = content.find("<|FunctionCallBegin|>")?;
-    let after = &content[start + "<|FunctionCallBegin|>".len()..];
-    let end = after.find("<|FunctionCallEnd|>")?;
-    let json_str = &after[..end];
-    let value: serde_json::Value = serde_json::from_str(json_str).ok()?;
-    let candidates: Vec<&serde_json::Value> = match &value {
-        serde_json::Value::Array(arr) => arr.iter().collect(),
-        _ => vec![&value],
-    };
-    for call in candidates {
-        let name = call["name"].as_str()?;
-        let args = call
-            .get("arguments")
-            .or_else(|| call.get("parameters"))?;
-        let args_str = match args {
-            serde_json::Value::String(s) => s.clone(),
-            other => other.to_string(),
-        };
-        return Some(FunctionCall {
-            name: name.to_string(),
-            arguments: args_str,
-        });
-    }
-    None
-}
-
 /// 打字机效果逐字输出（ANSI 转义序列整体打出）
 fn typewrite(text: &str, delay: Duration) {
     let bytes = text.as_bytes();
@@ -261,6 +178,52 @@ fn typewrite(text: &str, delay: Duration) {
             io::stdout().flush().ok();
             thread::sleep(delay);
         }
+    }
+}
+
+// ============================================================
+// bash 工具执行
+// ============================================================
+
+const DANGEROUS_CMDS: &[&str] = &[
+    "rm -rf /", "rd /s /q", "format ", "shutdown", "reboot",
+    "> NUL", "> \\\\.\\", "del /f /s", "erase /f", "remove-item -recurse",
+];
+
+/// 安全的执行 shell 命令（PowerShell），含危险命令过滤和输出截断
+fn run_bash(command: &str) -> String {
+    let lower = command.to_lowercase();
+    if DANGEROUS_CMDS.iter().any(|d| lower.contains(d)) {
+        return "错误：该命令已被安全策略拦截".to_string();
+    }
+
+    match Command::new("pwsh")
+        .args(["-NoProfile", "-Command", command])
+        .output()
+    {
+        Ok(output) => {
+            let mut result = String::new();
+            if !output.stdout.is_empty() {
+                result.push_str(&String::from_utf8_lossy(&output.stdout));
+            }
+            if !output.stderr.is_empty() {
+                if !result.is_empty() { result.push('\n'); }
+                result.push_str(&String::from_utf8_lossy(&output.stderr));
+            }
+            let trimmed = result.trim().to_string();
+            if trimmed.is_empty() {
+                return "(无输出)".to_string();
+            }
+            // 截断过大的输出
+            const MAX_OUTPUT: usize = 50000;
+            if trimmed.len() > MAX_OUTPUT {
+                let mut truncated = trimmed[..MAX_OUTPUT].to_string();
+                truncated.push_str(&format!("\n...（输出被截断，共 {} 字符）", trimmed.len()));
+                return truncated;
+            }
+            trimmed
+        }
+        Err(e) => format!("执行失败：{e}"),
     }
 }
 
@@ -300,7 +263,9 @@ fn chat_completion_stream(provider: &AiProvider, messages: &[RequestMessage]) ->
 
     let mut full_content = String::new();
     let mut line_buf = String::new();
-    let mut tool_calls_acc: Vec<(Option<String>, Option<String>, String)> = Vec::new();
+    let mut tool_call_id: Option<String> = None;
+    let mut tool_name: Option<String> = None;
+    let mut tool_args = String::new();
     let mut finish_reason: Option<String> = None;
 
     for line_result in reader.lines() {
@@ -335,19 +300,15 @@ fn chat_completion_stream(provider: &AiProvider, messages: &[RequestMessage]) ->
 
         if let Some(tcs) = &choice.delta.tool_calls {
             for tc in tcs {
-                let idx = tc.index.unwrap_or(0) as usize;
-                while tool_calls_acc.len() <= idx {
-                    tool_calls_acc.push((None, None, String::new()));
-                }
                 if let Some(id) = &tc.id {
-                    tool_calls_acc[idx].0 = Some(id.clone());
+                    tool_call_id = Some(id.clone());
                 }
                 if let Some(func) = &tc.function {
                     if let Some(name) = &func.name {
-                        tool_calls_acc[idx].1 = Some(name.clone());
+                        tool_name = Some(name.clone());
                     }
                     if let Some(args) = &func.arguments {
-                        tool_calls_acc[idx].2.push_str(args);
+                        tool_args.push_str(args);
                     }
                 }
             }
@@ -367,10 +328,10 @@ fn chat_completion_stream(provider: &AiProvider, messages: &[RequestMessage]) ->
     let _ = child.wait();
 
     if finish_reason.as_deref() == Some("tool_calls") {
-        if let Some((id, Some(name), args)) = tool_calls_acc.first() {
+        if let Some(name) = tool_name {
             return Ok(StreamOutcome::ToolCall {
-                fc: FunctionCall { name: name.clone(), arguments: args.clone() },
-                tool_call_id: id.clone(),
+                fc: FunctionCall { name, arguments: tool_args },
+                tool_call_id,
             });
         }
     }
@@ -381,10 +342,6 @@ fn chat_completion_stream(provider: &AiProvider, messages: &[RequestMessage]) ->
             typewrite(&formatted, Duration::from_millis(6));
             println!();
         }
-    }
-
-    if let Some(fc) = extract_function_call_from_content(&full_content) {
-        return Ok(StreamOutcome::ToolCall { fc, tool_call_id: None });
     }
 
     Ok(StreamOutcome::Complete(full_content))
@@ -521,103 +478,18 @@ generated: {today}
 }
 
 // ============================================================
-// 工具执行
-// ============================================================
-
-fn execute_tool(fc: &FunctionCall) -> String {
-    let args: serde_json::Value = match serde_json::from_str(&fc.arguments) {
-        Ok(v) => v,
-        Err(e) => return format!("解析参数失败：{e}"),
-    };
-
-    match fc.name.as_str() {
-        "run_help" => {
-            let cmd = args["command"].as_str().unwrap_or("");
-            if cmd.is_empty() {
-                return "错误：缺少 command 参数".into();
-            }
-            run_help(cmd).unwrap_or_else(|| format!("命令 '{cmd}' 不存在或 --help 无输出"))
-        }
-
-        "search_online" => {
-            let cmd = args["command"].as_str().unwrap_or("");
-            if cmd.is_empty() {
-                return "错误：缺少 command 参数".into();
-            }
-            match fetch_from_archlinux(cmd) {
-                Ok(text) => text,
-                Err(e) => e,
-            }
-        }
-
-        "read_docs" => {
-            let cmd = args["command"].as_str().unwrap_or("");
-            if cmd.is_empty() {
-                return "错误：缺少 command 参数".into();
-            }
-            let path = crate::config::Config::home_dir()
-                .join("docs")
-                .join(format!("{cmd}.md"));
-            match fs::read_to_string(&path) {
-                Ok(content) => content,
-                Err(_) => format!("本地文档 '{cmd}' 不存在"),
-            }
-        }
-
-        "save_docs" => {
-            let cmd = args["command"].as_str().unwrap_or("");
-            let content = args["content"].as_str().unwrap_or("");
-            if cmd.is_empty() || content.is_empty() {
-                return "错误：缺少 command 或 content 参数".into();
-            }
-            let path = crate::config::Config::home_dir()
-                .join("docs")
-                .join(format!("{cmd}.md"));
-            match fs::write(&path, content) {
-                Ok(_) => format!("手册已保存到 ~/.woman/docs/{cmd}.md"),
-                Err(e) => format!("保存失败：{e}"),
-            }
-        }
-
-        _ => format!("未知工具：{}", fc.name),
-    }
-}
-
-// ============================================================
 // 工具结果排版优化
 // ============================================================
 
-/// 将工具原始输出重排为段落风格（去掉 --help 自带的换行/缩进/多空格）
-fn flatten_output(text: &str) -> String {
-    let mut out = String::new();
-    let mut prev_empty = true;
-
-    for line in text.lines() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            if !prev_empty {
-                out.push('\n');
-                prev_empty = true;
-            }
-        } else {
-            if !prev_empty {
-                out.push(' ');
-            }
-            let normal: String = trimmed
-                .split_whitespace()
-                .collect::<Vec<_>>()
-                .join(" ");
-            out.push_str(&normal);
-            prev_empty = false;
-        }
+/// 截断工具结果，仅显示前几行预览
+fn truncate_output(text: &str) -> String {
+    let lines: Vec<&str> = text.lines().collect();
+    if lines.len() > 2 {
+        let preview: String = lines.iter().take(2).cloned().collect::<Vec<_>>().join("\n");
+        format!("{}\x1b[2m\n...（共 {} 行）\x1b[0m", preview, lines.len())
+    } else {
+        text.to_string()
     }
-
-    out
-}
-
-/// 工具名展示格式：run_help → RUN·HELP
-fn tool_display_name(name: &str) -> String {
-    name.to_uppercase().replace('_', "·")
 }
 
 // ============================================================
@@ -634,7 +506,8 @@ fn print_repl_help() {
     println!("  [\x1b[34m/model\x1b[0m] <name>    切换到指定模型");
     println!("╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌");
     println!("其余文字作为消息发送给 AI。");
-    println!("AI 会自动使用工具（run_help / search_online 等）获取信息。");
+    println!("AI 只有一个 bash 工具，可执行任何 PowerShell 命令。");
+    println!("例如：`ls.exe` `cat.exe` `curl.exe` `where.exe` 等。");
 }
 
 fn clear_screen() {
@@ -775,14 +648,16 @@ pub fn run_repl(initial: AiProvider, all_providers: &mut Vec<AiProvider>) -> Res
         loop {
             match chat_completion_stream(&current, &messages) {
                 Ok(StreamOutcome::ToolCall { fc, tool_call_id }) => {
-                    let display = tool_display_name(&fc.name);
-                    println!("\n\x1b[2m\x1b[38;5;244m🔧 {}\x1b[0m", display);
-                    let result = execute_tool(&fc);
-                    let flat = flatten_output(&result);
-                    if !flat.is_empty() {
-                        let preview: String = flat.lines().take(2).collect::<Vec<_>>().join("\n");
-                        let suffix = if flat.lines().count() > 2 { " ..." } else { "" };
-                        println!("\x1b[2m\x1b[38;5;244m{}{}\x1b[0m", preview, suffix);
+                    // 从 arguments 中提取 command 参数
+                    let cmd = serde_json::from_str::<serde_json::Value>(&fc.arguments)
+                        .ok()
+                        .and_then(|v| v["command"].as_str().map(|s| s.to_string()))
+                        .unwrap_or_else(|| fc.arguments.trim_matches('"').to_string());
+
+                    println!("\n\x1b[2m\x1b[38;5;244m$ {}\x1b[0m", cmd);
+                    let result = run_bash(&cmd);
+                    if !result.is_empty() {
+                        println!("\x1b[2m\x1b[38;5;244m{}\x1b[0m", truncate_output(&result));
                     }
 
                     let tcid = tool_call_id.unwrap_or_else(|| "call_0".to_string());

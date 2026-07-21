@@ -1,5 +1,14 @@
 # Changelog
 
+## [2026.07.21] — v0.7.0
+- 版本号从 `YYMM.DD.x` 改为 `MAJOR.MINOR.PATCH`（从此起用）
+- AI TTY 模式改造：4 个工具 → 1 个 `bash` 工具（"bash is everything"）
+- 删除废代码：`extract_function_call_from_content`、`execute_tool`、`flatten_output`、`tool_display_name`（-130 行）
+- 新增 `run_bash()`：pwsh 安全执行 + 危险命令过滤 + 输出截断
+- 更新 system prompt：工具说明 → 环境说明（coreutils `.exe` 后缀、`coreutils.exe --list-raw`）
+- 简化流式 SSE 处理：去掉多工具累积逻辑
+- **变更详情**：[Taolun → 2026-07-21 Bash is Everything](#2026-07-21--bash-is-everything) | [项目进度](#已完成)
+
 ## [2026.07.12] — v0.5.0
 - 实现 `woman generate <name>` — AI 自动生成结构化中文手册
 - 非流式 API 调用 + 自动获取原始资料（缓存优先 → --help 回退）
@@ -90,7 +99,7 @@
 1. **三次重试原则**：同一个问题重复 3 次无法解决，强制停止，向用户详细汇报遇到的问题，等待用户解答。
 2. **全中文**：整个对话流程全部使用中文，包括 AI 思考过程输出在终端中的内容。
 3. **详细注释**：代码必须有详细的中文注释。
-4. **版本格式**：`YYMM.DD.xxxx`（如 `2607.12.xxxx`），其中 `xxxx` 为作为 git tag 前的 commit ID 前 4 位，便于溯源。Cargo.toml 取前 3 段（`YYMM.DD.0`）以兼容 semver。
+4. **版本格式**：`MAJOR.MINOR.PATCH`（如 `0.7.0`），从 `v0.7.0` 起用。旧版 `YYMM.DD.x` 格式的历史版本号不变。
 5. **测试拆分**：测试文件按功能模块拆分成多个文件，禁止在一个文件里写全部测试。
 6. **面向对象**：采用 OOP 方式开发，保持功能模块单一，高内聚低耦合。
 
@@ -118,6 +127,7 @@
 - [x] 实现 `woman generate <name>` — AI 自动生成中文手册 — [Taolun → Generate](#2026-07-12--generate) | [Changelog → v0.5.0](#20260712--v050)
 - [x] 新增 learn.microsoft.com 在线源 + archlinux 404 修复 — [Taolun → MS Learn](#2026-07-12--ms-learn) | [Changelog → v0.6.0](#20260712--v060)
 - [x] 编译发布到 `C:\Program Files\coreutils\bin\` — [Changelog → v0.1.0](#20260711--v010)
+- [x] AI TTY 模式"bash is everything"改造 — [Taolun → 2026-07-21 Bash is Everything](#2026-07-21--bash-is-everything) | [Changelog → v0.7.0](#20260721--v070)
 
 ## 开发流程
 1. **先记录后编码**：每次改动前，先在 `Taolun` 章节保存讨论记录，再开始修改文件。
@@ -285,5 +295,24 @@
 
 ### 相关变更
 - [Changelog → v0.6.0](#20260712--v060) | [项目进度 → 已完成](#已完成)
+
+## 2026-07-21 — Bash is Everything
+### 讨论摘要
+- 参考 `claude/src/index.ts` 的智能体模式（single bash tool），改造 `woman ai` TTY 模式
+- 核心思路：AI 只有一个 bash 工具，所有操作（`--help`、curl 搜索、文件读写）通过 PowerShell 命令完成
+- 删除 4 个旧工具（`run_help`、`search_online`、`read_docs`、`save_docs`），对应删除 `execute_tool` 和 doubao 兼容代码
+- AI 直接跑 `pwsh -NoProfile -Command`，需被告知核心工具环境（coreutils `.exe` 后缀、`coreutils.exe --list-raw` 等）
+
+### 涉及文件
+- `src/ai.rs` — TOOLS_JSON（4→1）、SYSTEM_PROMPT（工具说明→环境说明）、新增 `run_bash()`、简化流式处理、删除 `execute_tool` 等废代码
+
+### 相关变更
+- [Changelog → v0.7.0](#20260721--v070) | [项目进度 → 已完成](#已完成)
+
+## 2026-07-21 — Bash is Everything 认知修正
+- **发现**：4 个硬编码工具的 doubao 兼容代码（`<|FunctionCallBegin|>` 标记）和工具派发逻辑（`execute_tool`）全部可以被一个 `bash` 工具替代
+- **纠正**：删除 4 个工具 → 用单一 `bash` 工具 + `run_bash()` 函数执行任何 PowerShell 命令
+- **教训**：工具越少，AI 越自由。硬编码搜索源（archlinux / MS Learn）不如让 AI 自己用 `curl.exe` 决定怎么查。Rust 代码量减少不等于能力减少，反而更灵活
+- **教训**：system prompt 需要准确描述执行环境（coreutils `.exe` 后缀、pwsh 路径倒斜杠），否则 AI 生成的命令会在 Windows 上报错
 
 ---> **CoreUtils 使用规范**：`grep` `ls` `sed` `find` 等命令用法详见 `~/.config/opencode/docs/coreutils.md`
