@@ -7,6 +7,7 @@ mod ai;
 mod config;
 mod display;
 mod docs;
+mod editor;
 mod fetch;
 mod tui;
 

@@ -514,18 +514,6 @@ fn clear_screen() {
     let _ = Command::new("cmd").args(["/c", "cls"]).status();
 }
 
-/// 重新启用终端自动换行（DECAWM，`\x1b[?7h`）
-///
-/// 部分场景会意外关闭自动换行，导致输入到行尾后不换行、反而从行首覆盖替换：
-/// - 进入过原始模式（raw mode）/ 备用屏幕后退出（如 `/model` 下拉框、TUI 阅读器）
-/// - 工具循环中 `pwsh` 子进程或命令输出的终端控制序列修改了终端状态
-///
-/// `ensure_autowrap` 是幂等保险，成本极低（几个字节），在任何读取用户输入之前调用。
-fn ensure_autowrap() {
-    let _ = write!(io::stdout(), "\x1b[?7h");
-    let _ = io::stdout().flush();
-}
-
 /// 交互式选择器：↑↓/jk 切换，Enter 确认，Esc 取消
 fn select_provider(all: &[AiProvider], current: &str) -> Option<usize> {
     if all.len() <= 1 { return None; }
@@ -591,26 +579,23 @@ pub fn run_repl(initial: AiProvider, all_providers: &mut Vec<AiProvider>) -> Res
     println!("\n🤖 WOMAN AI · \x1b[38;5;208m{}\x1b[0m", current.name);
     println!("💡 输入 [\x1b[34m/exit\x1b[0m] 退出 · [\x1b[34m/help\x1b[0m] 查看帮助\n");
 
-    let mut input = String::new();
     loop {
-        // 确保终端自动换行开启，避免输入到行尾后从行首覆盖（见 ensure_autowrap 注释）
-        ensure_autowrap();
-
-        print!("\x1b[34m> \x1b[0m");
-        io::stdout().flush().map_err(|e| format!("输出刷新失败：{e}"))?;
-
-        input.clear();
-        if io::stdin().read_line(&mut input).is_err() {
-            println!("\n再见！");
-            break;
-        }
-        let line = input.trim();
+        // 进入多行编辑器读取输入（raw 模式，支持斜杠候选抽屉、Ctrl+J 换行）
+        let line = match crate::editor::read_input() {
+            Some(l) => l,
+            None => {
+                println!("\n再见！");
+                break;
+            }
+        };
         if line.is_empty() {
             continue;
         }
 
         // ---- REPL 命令 ----
-        if line.starts_with('/') {
+        // 斜杠命令仅当「单行且以 / 开头」时生效；多行输入一律按普通消息发给 AI
+        let is_slash_cmd = line.starts_with('/') && !line.contains('\n');
+        if is_slash_cmd {
             let parts: Vec<&str> = line.split_whitespace().collect();
             match parts[0] {
                 "/exit" | "/quit" => {

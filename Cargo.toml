@@ -1,6 +1,6 @@
 [package]
 name = "woman"
-version = "0.7.1"
+version = "0.8.0"
 edition = "2021"
 description = "Windows man — 统一手册查看工具"
 
