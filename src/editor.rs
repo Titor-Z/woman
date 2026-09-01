@@ -26,14 +26,7 @@ use crossterm::{
 // ============================================================
 
 /// 内置命令候选（抽屉内容）。顺序即显示顺序。
-pub const COMMANDS: &[&str] = &[
-    "/help",
-    "/model",
-    "/clear",
-    "/truncate",
-    "/exit",
-    "/quit",
-];
+pub const COMMANDS: &[&str] = &["/help", "/model", "/clear", "/truncate", "/exit", "/quit"];
 
 const PROMPT: &str = "\x1b[34m> \x1b[0m";
 const PROMPT_WIDTH: usize = 2; // "> " 的字符宽度
@@ -121,10 +114,10 @@ fn cursor_pos(buf: &str, cursor: usize, term_width: usize) -> (usize, usize) {
 /// 行编辑器内部状态
 struct Editor {
     buf: String,
-    cursor: usize,    // 字节偏移
-    sel: usize,       // 抽屉选中项索引
+    cursor: usize,     // 字节偏移
+    sel: usize,        // 抽屉选中项索引
     prev_filt: String, // 上次的过滤前缀（用于前缀变化时重置选中项）
-    dismissed: bool,  // 用户按 Esc 关闭抽屉后的临时隐藏开关
+    dismissed: bool,   // 用户按 Esc 关闭抽屉后的临时隐藏开关
 }
 
 impl Editor {
@@ -183,7 +176,11 @@ impl Editor {
         if !self.buf.starts_with('/') {
             return String::new();
         }
-        self.buf[1..].split_whitespace().next().unwrap_or("").to_string()
+        self.buf[1..]
+            .split_whitespace()
+            .next()
+            .unwrap_or("")
+            .to_string()
     }
 
     /// 与当前过滤前缀匹配的内置命令列表
@@ -210,10 +207,7 @@ impl Editor {
         let idx = self.sel.min(m.len() - 1);
         let cmd = m[idx].clone();
         // 找到第一个空白位置：若存在则保留其后的参数
-        let end = self
-            .buf
-            .find(char::is_whitespace)
-            .unwrap_or(self.buf.len());
+        let end = self.buf.find(char::is_whitespace).unwrap_or(self.buf.len());
         let rest = self.buf[end..].to_string();
         self.buf = format!("{}{}", cmd, rest);
         self.cursor = cmd.len();
@@ -339,10 +333,7 @@ pub fn read_input() -> Option<String> {
     write!(io::stdout(), "\x1b[?7h").ok();
     let _ = io::stdout().flush();
 
-    let term_width = size()
-        .ok()
-        .map(|(w, _)| (w as usize).max(20))
-        .unwrap_or(80);
+    let term_width = size().ok().map(|(w, _)| (w as usize).max(20)).unwrap_or(80);
 
     let mut out = io::stdout();
     let mut ed = Editor::new();
@@ -355,7 +346,15 @@ pub fn read_input() -> Option<String> {
             Ok(e) => e,
             Err(_) => break ed.buf.trim().to_string(),
         };
-        let Event::Key(KeyEvent { code, modifiers, kind, .. }) = ev else { continue };
+        let Event::Key(KeyEvent {
+            code,
+            modifiers,
+            kind,
+            ..
+        }) = ev
+        else {
+            continue;
+        };
         if kind != KeyEventKind::Press {
             continue;
         }
@@ -626,10 +625,8 @@ mod tests {
             let args = &rest[..rest.len() - 1];
             match op {
                 'H' => {
-                    let mut parts: Vec<usize> = args
-                        .split(';')
-                        .map(|a| a.parse().unwrap_or(1))
-                        .collect();
+                    let mut parts: Vec<usize> =
+                        args.split(';').map(|a| a.parse().unwrap_or(1)).collect();
                     if parts.len() == 1 {
                         parts.insert(0, 1);
                     }
@@ -637,7 +634,11 @@ mod tests {
                     self.c = (parts[1].saturating_sub(1)) % self.cols;
                 }
                 'J' => {
-                    let n: usize = if args.is_empty() { 0 } else { args.parse().ok().unwrap_or(0) };
+                    let n: usize = if args.is_empty() {
+                        0
+                    } else {
+                        args.parse().ok().unwrap_or(0)
+                    };
                     if n == 0 {
                         for x in self.c..self.cols {
                             self.buf[self.r][x] = ' ';
@@ -661,12 +662,7 @@ mod tests {
     }
 
     /// 把某一步的 render 输出喂进屏幕模型，并断言某行不包含异常拼接片段
-    fn consume_render(
-        scr: &mut Screen,
-        ed: &Editor,
-        anchor: usize,
-        width: usize,
-    ) {
+    fn consume_render(scr: &mut Screen, ed: &Editor, anchor: usize, width: usize) {
         let mut sink = Vec::new();
         render(ed, anchor, width, &mut sink, true).unwrap();
         scr.write(&String::from_utf8_lossy(&sink));
@@ -759,9 +755,15 @@ mod tests {
         assert!(
             a_count <= 2,
             "收缩后不应残留大量 A（上滚导致锚点错位）：{} a_count={}\n{:?}",
-            joined, a_count, lines
+            joined,
+            a_count,
+            lines
         );
-        assert_eq!(prompt_count, 1, "提示符出现 {} 次：\n{:?}", prompt_count, lines);
+        assert_eq!(
+            prompt_count, 1,
+            "提示符出现 {} 次：\n{:?}",
+            prompt_count, lines
+        );
     }
 
     #[test]
@@ -824,29 +826,45 @@ mod tests {
             for _ in 0..2 {
                 ed.backspace();
                 if width == 8 {
-                    eprintln!("--- after backspace (buf={:?}) ---\n{:?}", ed.buf, scr.lines());
+                    eprintln!(
+                        "--- after backspace (buf={:?}) ---\n{:?}",
+                        ed.buf,
+                        scr.lines()
+                    );
                 }
                 consume_render(&mut scr, &ed, anchor, width);
             }
             for ch in text.chars() {
                 ed.insert(ch);
                 if width == 8 {
-                    eprintln!("--- typed '{}' (buf={:?}) cursor={} ---\n{:?}", ch, ed.buf, ed.cursor, scr.lines());
+                    eprintln!(
+                        "--- typed '{}' (buf={:?}) cursor={} ---\n{:?}",
+                        ch,
+                        ed.buf,
+                        ed.cursor,
+                        scr.lines()
+                    );
                 }
                 consume_render(&mut scr, &ed, anchor, width);
             }
             let joined: String = scr.lines().join("");
             // 统计原文每个字符应出现的次数，与屏幕实际出现次数比对（多出即重叠）。
-            let mut expected: std::collections::HashMap<char, usize> = std::collections::HashMap::new();
+            let mut expected: std::collections::HashMap<char, usize> =
+                std::collections::HashMap::new();
             for ch in text.chars().filter(|c| *c != ' ') {
                 *expected.entry(ch).or_insert(0) += 1;
             }
             for (ch, want) in expected {
                 let n = joined.matches(ch).count();
                 assert_eq!(
-                    n, want,
+                    n,
+                    want,
                     "宽度={} 时字符 '{}' 应出现 {} 次，实际 {} 次（重叠/缺失）\n{:?}",
-                    width, ch, want, n, scr.lines(),
+                    width,
+                    ch,
+                    want,
+                    n,
+                    scr.lines(),
                 );
             }
         }

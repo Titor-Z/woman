@@ -62,7 +62,9 @@ fn init_terminal() -> Result<Terminal<CrosstermBackend<std::io::Stdout>>, String
     Terminal::new(CrosstermBackend::new(out)).map_err(|e| format!("无法创建终端: {e}"))
 }
 
-fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>) -> Result<(), String> {
+fn restore_terminal(
+    terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
+) -> Result<(), String> {
     disable_raw_mode().map_err(|e| format!("无法退出原始模式: {e}"))?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen)
         .map_err(|e| format!("无法退出备用屏幕: {e}"))
@@ -123,7 +125,9 @@ fn run(
     };
 
     loop {
-        let size = terminal.size().map_err(|e| format!("获取终端大小失败: {e}"))?;
+        let size = terminal
+            .size()
+            .map_err(|e| format!("获取终端大小失败: {e}"))?;
         let content_height = if app.search_mode {
             size.height.saturating_sub(1) as usize
         } else {
@@ -198,7 +202,10 @@ fn run(
                 }
                 KeyCode::Char('N') if !app.matches.is_empty() => {
                     let len = app.matches.len();
-                    let prev = app.match_idx.map(|i| (i + len - 1) % len).unwrap_or(len - 1);
+                    let prev = app
+                        .match_idx
+                        .map(|i| (i + len - 1) % len)
+                        .unwrap_or(len - 1);
                     app.match_idx = Some(prev);
                     app.scroll = app.matches[prev];
                 }
@@ -329,9 +336,16 @@ fn markdown_to_lines(body: &str) -> Vec<Line<'static>> {
         if trimmed.starts_with("###") {
             let content = &trimmed[3..].trim();
             let spans = parse_inline(content);
-            let styled: Vec<Span> = spans.into_iter().map(|s| {
-                s.style(Style::default().add_modifier(Modifier::BOLD).add_modifier(Modifier::ITALIC))
-            }).collect();
+            let styled: Vec<Span> = spans
+                .into_iter()
+                .map(|s| {
+                    s.style(
+                        Style::default()
+                            .add_modifier(Modifier::BOLD)
+                            .add_modifier(Modifier::ITALIC),
+                    )
+                })
+                .collect();
             out.push(Line::from(styled));
             continue;
         }
@@ -339,9 +353,10 @@ fn markdown_to_lines(body: &str) -> Vec<Line<'static>> {
         if trimmed.starts_with("##") {
             let content = &trimmed[2..].trim();
             let spans = parse_inline(content);
-            let styled: Vec<Span> = spans.into_iter().map(|s| {
-                s.style(Style::default().add_modifier(Modifier::BOLD))
-            }).collect();
+            let styled: Vec<Span> = spans
+                .into_iter()
+                .map(|s| s.style(Style::default().add_modifier(Modifier::BOLD)))
+                .collect();
             out.push(Line::from(styled));
             continue;
         }
@@ -350,9 +365,10 @@ fn markdown_to_lines(body: &str) -> Vec<Line<'static>> {
         if first_char == '#' {
             let content = &trimmed[1..].trim();
             let spans = parse_inline(content);
-            let styled: Vec<Span> = spans.into_iter().map(|s| {
-                s.style(Style::default().add_modifier(Modifier::BOLD))
-            }).collect();
+            let styled: Vec<Span> = spans
+                .into_iter()
+                .map(|s| s.style(Style::default().add_modifier(Modifier::BOLD)))
+                .collect();
             out.push(Line::from(styled));
             continue;
         }
@@ -394,16 +410,19 @@ fn is_hrule(s: &str) -> bool {
         return false;
     }
     let first = no_spaces.chars().next().unwrap();
-    (first == '-' || first == '*' || first == '_')
-        && no_spaces.chars().all(|c| c == first)
+    (first == '-' || first == '*' || first == '_') && no_spaces.chars().all(|c| c == first)
 }
 
 fn is_ordered_list(s: &str) -> bool {
     let s = s.trim();
     let bytes = s.as_bytes();
-    if bytes.is_empty() { return false; }
+    if bytes.is_empty() {
+        return false;
+    }
     let mut i = 0;
-    while i < bytes.len() && bytes[i].is_ascii_digit() { i += 1; }
+    while i < bytes.len() && bytes[i].is_ascii_digit() {
+        i += 1;
+    }
     i > 0 && i < bytes.len() && bytes[i] == b'.'
 }
 
@@ -463,7 +482,8 @@ fn parse_inline(text: &str) -> Vec<Span<'static>> {
             }
         }
 
-        if chars[i] == '*' && (i == 0 || chars[i - 1] != '*')
+        if chars[i] == '*'
+            && (i == 0 || chars[i - 1] != '*')
             && (i + 1 >= chars.len() || chars[i + 1] != '*')
         {
             if let Some(end) = find_closing(&chars, i + 1, "*") {
@@ -519,5 +539,142 @@ fn find_closing(chars: &[char], start: usize, pattern: &str) -> Option<usize> {
 }
 
 fn find_char(chars: &[char], start: usize, target: char) -> Option<usize> {
-    chars[start..].iter().position(|&c| c == target).map(|p| start + p)
+    chars[start..]
+        .iter()
+        .position(|&c| c == target)
+        .map(|p| start + p)
 }
+
+// ============================================================
+// mdr 风格卡片选择器（用于命令类型歧义时让用户选择）
+// ============================================================
+
+/// 全屏卡片式选择器：↑↓/jk 选择，Enter 确认，q/Esc 取消。
+///
+/// 参考 mdr 的文件选择器风格：每项两行（名称加粗 + 说明 dim），
+/// 选中项左侧显示 `│` 蓝色标记，底部显示快捷键提示。
+/// 返回选中项下标；取消返回 `None`。
+///
+/// 非终端环境（管道/重定向）直接返回第 0 项，避免无法交互。
+pub fn pick_entries(entries: &[(String, String)], title: &str) -> Option<usize> {
+    if !stdout().is_terminal() {
+        return Some(0);
+    }
+    if entries.is_empty() {
+        return None;
+    }
+
+    let mut terminal = match init_terminal() {
+        Ok(t) => t,
+        Err(_) => return Some(0),
+    };
+
+    let mut selected = 0usize;
+    let result = loop {
+        let size = terminal.size().ok()?;
+        let h = size.height as usize;
+        // 每项占 2 行（名称 + 说明）+ 1 空行 = 3
+        let card_rows = 3usize;
+        let visible = h.saturating_sub(1) / card_rows.max(1);
+        let scroll_offset = if selected >= visible {
+            selected - visible + 1
+        } else {
+            0
+        };
+
+        terminal
+            .draw(|frame| {
+                let area = frame.area();
+                // 标题
+                frame.render_widget(
+                    Paragraph::new(Text::from(Line::from(Span::styled(
+                        title.to_string(),
+                        Style::default().fg(Color::Rgb(0, 100, 200)).add_modifier(Modifier::BOLD),
+                    )))),
+                    Rect::new(area.x, area.y, area.width, 1),
+                );
+
+                // 卡片列表
+                for i in scroll_offset..(scroll_offset + visible).min(entries.len()) {
+                    let (label, desc) = &entries[i];
+                    let is_sel = i == selected;
+                    let card_y = area.y + 2 + ((i - scroll_offset) as u16) * 3;
+
+                    let theme = Color::Rgb(0, 100, 200);
+                    let bar = if is_sel { "│" } else { " " };
+
+                    frame.render_widget(
+                        Paragraph::new(Line::from(vec![
+                            Span::styled(
+                                bar,
+                                if is_sel { Style::default().fg(theme) } else { Style::default().fg(Color::Rgb(80, 80, 90)) },
+                            ),
+                            Span::styled(
+                                format!(" {}", label),
+                                if is_sel {
+                                    Style::default().fg(theme).add_modifier(Modifier::BOLD)
+                                } else {
+                                    Style::default().fg(Color::White)
+                                },
+                            ),
+                        ])),
+                        Rect::new(area.x + 2, card_y, area.width.saturating_sub(4), 1),
+                    );
+
+                    frame.render_widget(
+                        Paragraph::new(Line::from(vec![
+                            Span::styled(bar, if is_sel { Style::default().fg(theme) } else { Style::default().fg(Color::Rgb(80, 80, 90)) }),
+                            Span::styled(
+                                format!(" {}", desc),
+                                if is_sel {
+                                    Style::default().fg(Color::Rgb(100, 160, 220)).add_modifier(Modifier::DIM)
+                                } else {
+                                    Style::default().fg(Color::Rgb(120, 120, 135)).add_modifier(Modifier::DIM)
+                                },
+                            ),
+                        ])),
+                        Rect::new(area.x + 2, card_y + 1, area.width.saturating_sub(4), 1),
+                    );
+                }
+
+                // 底部快捷键提示
+                let mut spans: Vec<Span> = vec![
+                    Span::styled("↑↓ 选择", Style::default().fg(Color::Rgb(140, 140, 155))),
+                    Span::styled("  ·  ", Style::default().fg(Color::Rgb(140, 140, 155))),
+                    Span::styled("Enter 确认", Style::default().fg(Color::Rgb(140, 140, 155))),
+                    Span::styled("  ·  ", Style::default().fg(Color::Rgb(140, 140, 155))),
+                    Span::styled("q/Esc 取消", Style::default().fg(Color::Rgb(140, 140, 155))),
+                ];
+                spans.push(Span::raw("  "));
+                for s in spans.iter_mut() {
+                    let _ = s;
+                }
+                frame.render_widget(
+                    Paragraph::new(Line::from(spans)),
+                    Rect::new(area.x, area.y + area.height.saturating_sub(1), area.width, 1),
+                );
+            })
+            .ok()?;
+
+        let ev = event::read().ok()?;
+        let Event::Key(key) = ev else { continue };
+        if key.kind != KeyEventKind::Press {
+            continue;
+        }
+        match key.code {
+            KeyCode::Up | KeyCode::Char('k') if selected > 0 => selected -= 1,
+            KeyCode::Down | KeyCode::Char('j') if selected + 1 < entries.len() => selected += 1,
+            KeyCode::PageUp => selected = selected.saturating_sub(visible),
+            KeyCode::PageDown => selected = (selected + visible).min(entries.len() - 1),
+            KeyCode::Home | KeyCode::Char('g') => selected = 0,
+            KeyCode::End | KeyCode::Char('G') => selected = entries.len() - 1,
+            KeyCode::Enter => break Some(selected),
+            KeyCode::Char('q') | KeyCode::Esc => break None,
+            _ => {}
+        }
+    };
+
+    let _ = restore_terminal(&mut terminal);
+    result
+}
+

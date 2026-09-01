@@ -3,31 +3,36 @@
 // AI 只有一个 bash 工具，所有操作通过 PowerShell 命令完成
 
 use crate::config::{AiProvider, Config};
-use crate::docs::{current_date, find_in_cache, find_in_docs};
-use crate::fetch::{command_exists, run_help};
+use crate::docs::current_date;
+use crate::platform;
 
+use crossterm::cursor::{Hide, MoveUp, Show};
+use crossterm::event::{read, Event, KeyCode, KeyEventKind};
+use crossterm::execute;
+use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
 use serde::de::Deserializer;
 use serde::{Deserialize, Serialize};
 use std::io::{self, BufRead, Write};
+use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::thread;
 use std::time::Duration;
-use crossterm::cursor::{Hide, MoveUp, Show};
-use crossterm::event::{read, Event, KeyCode, KeyEventKind};
-use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
-use crossterm::execute;
 
 // ============================================================
 // 系统提示词
 // ============================================================
 
-const SYSTEM_PROMPT: &str = "\
-你是一个 Windows 命令行助手 woman AI，默认运行在 PowerShell 环境中。
+/// 构建按平台定制的系统提示词：Windows 讲 PowerShell + coreutils `.exe`；
+/// Unix 讲 `sh` + 系统命令 + man。两者环境说明与本地手册路径不同。
+fn system_prompt() -> String {
+    #[cfg(target_os = "windows")]
+    {
+        r#"你是一个 Windows 命令行助手 woman AI，默认运行在 PowerShell 环境中。
 你只有一个工具 **bash**，所有操作都通过它完成。
 
 ## 环境说明
 - 底层 shell：PowerShell（`pwsh -NoProfile -Command`）
-- 本机已安装 GNU coreutils（`C:\\Program Files\\coreutils\\bin\\`），以下命令**必须加 `.exe` 后缀**（PowerShell alias 会拦截 `ls` `cat` 等）：
+- 本机已安装 GNU coreutils（`C:\Program Files\coreutils\bin\`），以下命令**必须加 `.exe` 后缀**（PowerShell alias 会拦截 `ls` `cat` 等）：
   `ls.exe` `cat.exe` `cp.exe` `mv.exe` `rm.exe` `mkdir.exe` `echo.exe`
 - 运行 `coreutils.exe --list-raw` 查看所有支持的命令列表
 - 其他 coreutils 命令可直接使用（如 `grep` `sed` `find` `head` `tail` `wc` 等）
@@ -35,29 +40,83 @@ const SYSTEM_PROMPT: &str = "\
 - HTTP 请求用 `curl.exe`
 - 查找命令路径用 `where.exe` <name>
 
+## 本地手册资料
+本机已有 woman 手册体系，回答命令类问题时**优先查阅本地资料**，再决定是否联网：
+- 正式手册：`cat.exe $env:USERPROFILE\.woman\docs\<name>.md`（AI 整理后的中文手册）
+- 原始缓存：`cat.exe $env:USERPROFILE\.woman\cache\<name>.txt`
+- PowerShell 指令：`Get-Help <name> -Full`
+- 列出已有手册：`ls.exe $env:USERPROFILE\.woman\docs\`
+- 整理新手册时，遵守 `$env:USERPROFILE\.woman\skills\manual.md` 的章节结构（先 `cat.exe` 读它，再按其模板整理并写入 `docs\` 目录，frontmatter 用 `source: ai-enhanced`）
+
 ## 优先级（按回答偏好从高到低）
 1. **GNU coreutils** — 本机已安装。回答时优先介绍 coreutils 版本。
-2. **自定义命令** — `was`、`unwas`（PowerShell $PROFILE 别名管理）、`woman`（本工具）等，这些是本机特有命令。
+2. **自定义命令** — `was`、`unwas`、`woman`（本工具）等，这些是本机特有命令。
 3. **标准 Windows 命令** — `dir` `find` `icacls` 等 cmd.exe 原生命令。
 4. **PowerShell cmdlet** — `Get-ChildItem` `Select-String` 等，优先级最低，仅在用户明确询问或前两者无法覆盖时才回答。
 
 ## 规则
 1. 始终用中文回答
-2. 当用户询问某个命令时，先通过 `bash` 获取原始信息（如 `command --help`、`curl.exe` 抓取在线手册），再给出结构化的中文解释
+2. 当用户询问某个命令时，先通过 `bash` 获取原始信息（如 `command --help`、`Get-Help`、`cat.exe` 读本地手册、`curl.exe` 抓取在线手册），再给出结构化的中文解释
 3. 解释应包含：用途、基本语法、常用选项、典型示例
-4. 如果用户要求生成或保存手册，使用 bash 的 echo/重定向写入文件到 `$env:USERPROFILE\\.woman\\docs\\` 目录，内容须包含 YAML frontmatter：
+4. 如果用户要求生成或保存手册，用 bash 的 echo/重定向写入文件到 `$env:USERPROFILE\.woman\docs\` 目录，内容须包含 YAML frontmatter：
    ---
    title: <命令名>
-   source: ai-generated
+   source: ai-enhanced
    generated: YYYY-MM-DD
+   type: <coreutils|powershell|windows>
    ---
-5. **终端友好排版**：由于输出在终端渲染，请**避免使用表格和 Markdown 代码块（```）**。推荐用**列表（- 或 1.）、缩进、加粗**来组织内容";
+5. **终端友好排版**：由于输出在终端渲染，请**避免使用表格和 Markdown 代码块（```）**。推荐用**列表（- 或 1.）、缩进、加粗**来组织内容"#
+            .to_string()
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        r#"你是一个 Unix 命令行助手 woman AI，默认运行在 POSIX shell（sh）环境中，作为 man 的全平台替代品。
+你只有一个工具 **bash**，所有操作都通过它完成。
+
+## 环境说明
+- 底层 shell：POSIX `sh`（`sh -c <命令>`）
+- 本机命令即系统二进制，无需任何后缀（如 `ls` `cat` `grep` `find` `man` 均直接可用）
+- 查看命令手册：`man <name>` 或 `whatis <name>`
+- 读文件用 `cat`
+- HTTP 请求用 `curl`
+- 查找命令路径用 `which` <name>
+- 环境变量路径用 `$HOME`（如 `$HOME/.woman/...`），不要用 Windows 的 `$env:USERPROFILE`
+
+## 本地手册资料
+本机已有 woman 手册体系，回答命令类问题时**优先查阅本地资料**，再决定是否联网：
+- 正式手册：`cat $HOME/.woman/docs/<name>.md`（AI 整理后的中文手册）
+- 原始缓存：`cat $HOME/.woman/cache/<name>.txt`
+- 列出已有手册：`ls $HOME/.woman/docs/`
+- 整理新手册时，遵守 `$HOME/.woman/skills/manual.md` 的章节结构（先 `cat` 读它，再按其模板整理并写入 `docs/` 目录，frontmatter 用 `source: ai-enhanced`）
+
+## 优先级（按回答偏好从高到低）
+1. **系统标准命令**（POSIX/GNU 工具）— 本机自带，回答时优先介绍系统版本。
+2. **自定义命令** — `woman`（本工具）等，本机特有命令。
+
+## 规则
+1. 始终用中文回答
+2. 当用户询问某个命令时，先通过 `bash` 获取原始信息（如 `command --help`、`man <name>`、`cat` 读本地手册、`curl` 抓取在线手册），再给出结构化的中文解释
+3. 解释应包含：用途、基本语法、常用选项、典型示例
+4. 如果用户要求生成或保存手册，用 bash 的 echo/重定向写入文件到 `$HOME/.woman/docs/` 目录，内容须包含 YAML frontmatter：
+   ---
+   title: <命令名>
+   source: ai-enhanced
+   generated: YYYY-MM-DD
+   type: <coreutils|unknown>
+   ---
+5. **终端友好排版**：由于输出在终端渲染，请**避免使用表格和 Markdown 代码块（```）**。推荐用**列表（- 或 1.）、缩进、加粗**来组织内容"#
+            .to_string()
+    }
+}
 
 // ============================================================
-// 工具定义（OpenAI tools 格式）
+// 工具定义（OpenAI tools 格式，shell 描述按平台定制）
 // ============================================================
 
-const TOOLS_JSON: &str = r#"[
+fn tools_json() -> String {
+    #[cfg(target_os = "windows")]
+    {
+        r#"[
   {
     "type": "function",
     "function": {
@@ -75,14 +134,40 @@ const TOOLS_JSON: &str = r#"[
       }
     }
   }
-]"#;
+]"#
+        .to_string()
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        r#"[
+  {
+    "type": "function",
+    "function": {
+      "name": "bash",
+      "description": "Run a shell command on Unix (sh). Execute any command, script, or program. Returns stdout + stderr.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "command": {
+            "type": "string",
+            "description": "The sh command to execute"
+          }
+        },
+        "required": ["command"]
+      }
+    }
+  }
+]"#
+        .to_string()
+    }
+}
 
 // ============================================================
 // API 消息类型
 // ============================================================
 
 /// 发送给 API 的消息（兼容新旧两种 role 格式）
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 struct RequestMessage {
     role: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -141,7 +226,10 @@ struct StreamFunction {
 /// 流式调用结果
 enum StreamOutcome {
     Complete(String),
-    ToolCall { fc: FunctionCall, tool_call_id: Option<String> },
+    ToolCall {
+        fc: FunctionCall,
+        tool_call_id: Option<String>,
+    },
 }
 
 /// 函数调用结构（兼容两种 arguments 格式）
@@ -168,8 +256,12 @@ fn typewrite(text: &str, delay: Duration) {
     while i < bytes.len() {
         if bytes[i] == 0x1b {
             let start = i;
-            while i < bytes.len() && bytes[i] != b'm' { i += 1; }
-            if i < bytes.len() { i += 1; }
+            while i < bytes.len() && bytes[i] != b'm' {
+                i += 1;
+            }
+            if i < bytes.len() {
+                i += 1;
+            }
             print!("{}", &text[start..i]);
         } else {
             let c = text[i..].chars().next().unwrap();
@@ -185,29 +277,64 @@ fn typewrite(text: &str, delay: Duration) {
 // bash 工具执行
 // ============================================================
 
-const DANGEROUS_CMDS: &[&str] = &[
-    "rm -rf /", "rd /s /q", "format ", "shutdown", "reboot",
-    "> NUL", "> \\\\.\\", "del /f /s", "erase /f", "remove-item -recurse",
-];
-
-/// 安全的执行 shell 命令（PowerShell），含危险命令过滤和输出截断
-fn run_bash(command: &str) -> String {
+/// 平台相关危险命令黑名单判定：命中即拦截执行。
+/// Windows 拦 PowerShell/cmd 破坏性惯用法；Unix 拦 rm -rf 根目录等。
+fn is_dangerous(command: &str) -> bool {
     let lower = command.to_lowercase();
-    if DANGEROUS_CMDS.iter().any(|d| lower.contains(d)) {
+    #[cfg(target_os = "windows")]
+    {
+        const DANGEROUS: &[&str] = &[
+            "rm -rf /",
+            "rd /s /q",
+            "format ",
+            "shutdown",
+            "reboot",
+            "> NUL",
+            "> \\\\.\\",
+            "del /f /s",
+            "erase /f",
+            "remove-item -recurse",
+        ];
+        DANGEROUS.iter().any(|d| lower.contains(d))
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        const DANGEROUS: &[&str] = &[
+            "rm -rf /",
+            "rm -fr /",
+            "> /dev/sda",
+            "mkfs",
+            "dd if=",
+            ":(){:|:&};:",
+            "shutdown",
+            "reboot",
+            "halt",
+            "poweroff",
+        ];
+        DANGEROUS.iter().any(|d| lower.contains(d))
+    }
+}
+
+/// 安全的执行 shell 命令（按平台：Windows pwsh / Unix sh），含危险命令过滤和输出截断
+fn run_bash(command: &str) -> String {
+    if is_dangerous(command) {
         return "错误：该命令已被安全策略拦截".to_string();
     }
 
-    match Command::new("pwsh")
-        .args(["-NoProfile", "-Command", command])
-        .output()
-    {
-        Ok(output) => {
+    let (shell, prefix) = platform::shell_runner();
+    let mut cmd = Command::new(shell);
+    cmd.args(prefix).arg(command);
+
+    match cmd.output().ok() {
+        Some(output) => {
             let mut result = String::new();
             if !output.stdout.is_empty() {
                 result.push_str(&String::from_utf8_lossy(&output.stdout));
             }
             if !output.stderr.is_empty() {
-                if !result.is_empty() { result.push('\n'); }
+                if !result.is_empty() {
+                    result.push('\n');
+                }
                 result.push_str(&String::from_utf8_lossy(&output.stderr));
             }
             let trimmed = result.trim().to_string();
@@ -215,7 +342,9 @@ fn run_bash(command: &str) -> String {
                 return "(无输出)".to_string();
             }
             // 截断过大的输出
-            const MAX_OUTPUT: usize = 50000;
+            // 注意：这个返回值会被塞进上下文的 tool 消息，并在后续每轮请求里反复发送，
+            // 因此必须保持精简以节省 token。AI 只需提炼要点，默认保留前面 MAX_OUTPUT 字符足矣。
+            const MAX_OUTPUT: usize = 12000;
             if trimmed.len() > MAX_OUTPUT {
                 let mut truncated = trimmed[..MAX_OUTPUT].to_string();
                 truncated.push_str(&format!("\n...（输出被截断，共 {} 字符）", trimmed.len()));
@@ -223,7 +352,7 @@ fn run_bash(command: &str) -> String {
             }
             trimmed
         }
-        Err(e) => format!("执行失败：{e}"),
+        None => "执行失败：无法启动命令".to_string(),
     }
 }
 
@@ -231,32 +360,70 @@ fn run_bash(command: &str) -> String {
 // 流式 API 调用（SSE via curl -N）
 // ============================================================
 
-fn chat_completion_stream(provider: &AiProvider, messages: &[RequestMessage]) -> Result<StreamOutcome, String> {
+// ============================================================
+// curl 请求体写入文件（避免超长命令行 os error 206）
+// ============================================================
+
+/// 把 JSON 请求体写入临时文件，返回 `-d @<path>` 参数值。
+///
+/// Windows `CreateProcess` 命令行长度上限为 32767 字符（os error 206：
+/// 文件名或扩展名太长）。当对话历史累积过长时，直接把 body 塞进
+/// `-d <body>` 会超出该限制导致 curl.exe 无法启动，因此改用
+/// `-d @file` 让 curl 从文件读取请求体。
+fn write_body_file(body_str: &str) -> Result<String, String> {
+    let dir = std::env::temp_dir();
+    let path = dir.join(format!("woman_body_{}.json", std::process::id()));
+    std::fs::write(&path, body_str).map_err(|e| format!("写入请求体临时文件失败：{e}"))?;
+    Ok(format!("@{}", path.display()))
+}
+
+/// 清理临时请求体文件。curl 用 `-d @file` 读取请求体，
+/// 必须在 curl 进程结束后再删除，避免读取时文件被移除（竞态）。
+fn remove_body_file(arg: &str) {
+    if let Some(p) = arg.strip_prefix('@') {
+        let _ = std::fs::remove_file(PathBuf::from(p));
+    }
+}
+
+fn chat_completion_stream(
+    provider: &AiProvider,
+    messages: &[RequestMessage],
+) -> Result<StreamOutcome, String> {
     let url = provider.api_base.trim_end_matches('/').to_string();
 
     let body = serde_json::json!({
         "model": provider.model,
         "messages": messages,
-        "tools": serde_json::from_str::<serde_json::Value>(TOOLS_JSON).unwrap(),
+        "tools": serde_json::from_str::<serde_json::Value>(&tools_json()).unwrap(),
         "tool_choice": "auto",
         "stream": true,
     });
 
     let body_str = body.to_string();
-    let mut child = Command::new("curl.exe")
+    let data_arg = write_body_file(&body_str)?;
+    let mut child = Command::new(platform::curl_bin())
         .args([
-            "-sS", "-N",
-            "-X", "POST",
+            "-sS",
+            "-N",
+            "-X",
+            "POST",
             &url,
-            "-m", "120",
-            "-H", "Content-Type: application/json",
-            "-H", &format!("Authorization: Bearer {}", provider.api_key),
-            "-d", &body_str,
+            "-m",
+            "120",
+            "-H",
+            "Content-Type: application/json",
+            "-H",
+            &format!("Authorization: Bearer {}", provider.api_key),
+            "-d",
+            &data_arg,
         ])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .map_err(|e| format!("无法启动 curl.exe：{e}"))?;
+        .map_err(|e| {
+            remove_body_file(&data_arg);
+            format!("无法启动 {}：{e}", platform::curl_bin())
+        })?;
 
     let stdout = child.stdout.take().unwrap();
     let reader = io::BufReader::new(stdout);
@@ -287,7 +454,10 @@ fn chat_completion_stream(provider: &AiProvider, messages: &[RequestMessage]) ->
                         return Err(format!("API 错误：{msg}"));
                     }
                 }
-                return Err(format!("解析流事件失败：{e}\n原始数据：{}", &data[..data.len().min(200)]));
+                return Err(format!(
+                    "解析流事件失败：{e}\n原始数据：{}",
+                    &data[..data.len().min(200)]
+                ));
             }
         };
 
@@ -320,17 +490,24 @@ fn chat_completion_stream(provider: &AiProvider, messages: &[RequestMessage]) ->
             while let Some(pos) = line_buf.find('\n') {
                 let complete = line_buf[..=pos].to_string();
                 line_buf = line_buf[pos + 1..].to_string();
-                typewrite(&crate::display::ansi_format(&complete), Duration::from_millis(6));
+                typewrite(
+                    &crate::display::ansi_format(&complete),
+                    Duration::from_millis(6),
+                );
             }
         }
     }
 
     let _ = child.wait();
+    remove_body_file(&data_arg);
 
     if finish_reason.as_deref() == Some("tool_calls") {
         if let Some(name) = tool_name {
             return Ok(StreamOutcome::ToolCall {
-                fc: FunctionCall { name, arguments: tool_args },
+                fc: FunctionCall {
+                    name,
+                    arguments: tool_args,
+                },
                 tool_call_id,
             });
         }
@@ -361,18 +538,25 @@ fn chat_completion(provider: &AiProvider, messages: &[RequestMessage]) -> Result
     });
 
     let body_str = body.to_string();
-    let output = Command::new("curl.exe")
+    let data_arg = write_body_file(&body_str)?;
+    let output = Command::new(platform::curl_bin())
         .args([
             "-sS",
-            "-X", "POST",
+            "-X",
+            "POST",
             &url,
-            "-m", "120",
-            "-H", "Content-Type: application/json",
-            "-H", &format!("Authorization: Bearer {}", provider.api_key),
-            "-d", &body_str,
+            "-m",
+            "120",
+            "-H",
+            "Content-Type: application/json",
+            "-H",
+            &format!("Authorization: Bearer {}", provider.api_key),
+            "-d",
+            &data_arg,
         ])
         .output()
-        .map_err(|e| format!("无法启动 curl.exe：{e}"))?;
+        .map_err(|e| format!("无法启动 {}：{e}", platform::curl_bin()))?;
+    remove_body_file(&data_arg);
 
     if !output.status.success() {
         let err = String::from_utf8_lossy(&output.stderr);
@@ -380,8 +564,8 @@ fn chat_completion(provider: &AiProvider, messages: &[RequestMessage]) -> Result
     }
 
     let text = String::from_utf8_lossy(&output.stdout).to_string();
-    let resp: serde_json::Value = serde_json::from_str(&text)
-        .map_err(|e| format!("解析 API 响应失败：{e}"))?;
+    let resp: serde_json::Value =
+        serde_json::from_str(&text).map_err(|e| format!("解析 API 响应失败：{e}"))?;
 
     if let Some(msg) = resp["error"]["message"].as_str() {
         return Err(format!("API 错误：{msg}"));
@@ -394,87 +578,161 @@ fn chat_completion(provider: &AiProvider, messages: &[RequestMessage]) -> Result
 }
 
 // ============================================================
-// 文档生成（woman generate）
+// AI 增强整理 + 一次性问答
 // ============================================================
 
-/// 为指定命令生成 AI 手册并保存到 docs/
-pub fn generate_docs(name: &str) -> Result<(), String> {
+/// 把命令原始资料整理成符合 skill 模板的结构化中文手册。
+///
+/// - `skill`：`~/.woman/skills/manual.md` 的内容（含章节结构模板 + 整理指令）
+/// - `raw`：命令原始资料（缓存/源抓取内容）
+/// - 返回整理后的 Markdown 文档字符串（含 YAML frontmatter）
+pub fn enhance(
+    name: &str,
+    local_help: Option<&str>,
+    online: Option<&str>,
+    skill: &str,
+    cmd_type: &str,
+) -> Result<String, String> {
     let config = Config::load();
-    let provider = config.get_provider(None)
-        .ok_or_else(|| "未配置 AI 提供者。请编辑 ~/.woman/config.json 添加 ai 配置。".to_string())?;
+    let provider = config.get_provider(None).ok_or_else(|| {
+        "未配置 AI 提供者。请编辑 ~/.woman/config.json 添加 ai 配置。".to_string()
+    })?;
 
     let key = provider.api_key.trim();
     if key.is_empty() || key.contains("your-api-key") {
         return Err("API 密钥未配置或为占位符".to_string());
     }
 
-    // 获取原始资料
-    let (source_content, source_type) = if let Some(doc) = find_in_cache(name) {
-        (doc.body, "缓存手册")
-    } else if command_exists(name) {
-        if let Some(help_text) = run_help(name) {
-            (help_text, "--help 输出")
-        } else {
-            return Err(format!("'{name}' --help 无输出"));
-        }
-    } else {
-        return Err(format!("找不到 '{name}' 的缓存或命令。请先运行 `woman search {name}`"));
-    };
-
     let today = current_date();
-    let sys_prompt = format!(
-        "你是一个文档生成助手。请根据提供的原始资料，生成一份结构化的中文手册。
 
-要求：
-- 输出必须包含 YAML frontmatter，格式如下：
----
-title: {name}
-source: ai-generated
-generated: {today}
----
-
-- 内容应包含：用途说明、基本语法、常用选项、典型示例
-- 终端友好排版：不要使用表格和 Markdown 代码块（```）
-- 使用列表（- 或 1.）、加粗、缩进来组织内容
-- 语言：中文",
-        name = name,
-        today = today,
-    );
+    // 把本地 --help 与在线全文分别标注后一起喂给 AI，
+    // 供其按 skill 指令做「本地选项校对」（在线有而本地没有 → 标注不支持）。
+    let mut user_msg = format!("命令名：{name}\n命令类型：{cmd_type}\n\n");
+    match (local_help, online) {
+        (Some(help), Some(onl)) => {
+            user_msg.push_str(&format!(
+                "【本地 --help / ? 输出（本机选项真值）】\n```\n{}\n```\n\n",
+                help.trim()
+            ));
+            user_msg.push_str(&format!("【在线手册全文】\n{}\n", onl.trim()));
+        }
+        (Some(help), None) => {
+            user_msg.push_str(&format!(
+                "【本地 --help / ? 输出（本机选项真值）】\n```\n{}\n```\n",
+                help.trim()
+            ));
+        }
+        (None, Some(onl)) => {
+            user_msg.push_str(&format!("【在线手册全文】\n{}\n", onl.trim()));
+        }
+        (None, None) => {
+            user_msg.push_str("（未提供原始资料）\n");
+        }
+    }
 
     let messages = vec![
         RequestMessage {
             role: "system".into(),
-            content: Some(sys_prompt),
+            content: Some(format!(
+                "你是一个中文手册整理助手。请严格按照给定的 skill 章节结构模板与整理指令，\
+                 把用户提供的命令资料整理成一份**详细完整、可离线参考**的中文手册。\
+                 当前日期为 {today}，frontmatter 中的 generated 填这个日期。\n\n{skill}"
+            )),
             tool_call_id: None,
             name: None,
             tool_calls: None,
         },
         RequestMessage {
             role: "user".into(),
-            content: Some(format!("以下是为 {name} 生成的原始资料（{source_type}）：\n\n{source_content}")),
+            content: Some(user_msg),
             tool_call_id: None,
             name: None,
             tool_calls: None,
         },
     ];
 
-    println!("\n🤖 WOMAN AI · {} 正在生成 {} 文档...\n", provider.name, name);
-    let content = chat_completion(&provider, &messages)?;
+    chat_completion(&provider, &messages)
+}
 
-    // 保存到 docs/
-    let path = Config::docs_dir().join(format!("{}.md", name));
-    std::fs::write(&path, &content)
-        .map_err(|e| format!("保存文档失败：{e}"))?;
+/// 一次性问答（`woman -q "<问题>"`）：agent 式自由回答。
+///
+/// 让 AI 用 bash 工具自行读取 `~/.woman/docs|cache` 等本地资料作为上下文，
+/// 只回答一轮即结束。返回最终回答文本（流式打印由调用方处理）。
+///
+/// 无 AI key 时返回错误（-q 本质依赖 AI）。
+pub fn ask_once(question: &str) -> Result<String, String> {
+    let config = Config::load();
+    let provider = config.get_provider(None).ok_or_else(|| {
+        "未配置 AI 提供者。请编辑 ~/.woman/config.json 添加 ai 配置。".to_string()
+    })?;
 
-    println!("文档已保存 {} 完毕。", path.display());
-
-    // 显示生成的文档
-    if let Some(doc) = find_in_docs(name) {
-        let badge = doc.source_badge();
-        let _ = crate::tui::show_document(&doc.body, &[badge.as_str()]);
+    let key = provider.api_key.trim();
+    if key.is_empty() || key.contains("your-api-key") {
+        return Err("API 密钥未配置或为占位符（woman -q 需要 AI 能力）".to_string());
     }
 
-    Ok(())
+    let mut messages: Vec<RequestMessage> = Vec::new();
+    messages.push(RequestMessage {
+        role: "system".into(),
+        content: Some(system_prompt()),
+        tool_call_id: None,
+        name: None,
+        tool_calls: None,
+    });
+    messages.push(RequestMessage {
+        role: "user".into(),
+        content: Some(question.to_string()),
+        tool_call_id: None,
+        name: None,
+        tool_calls: None,
+    });
+
+    // 工具调用循环（与 run_repl 内核一致，但只跑一轮）
+    loop {
+        match chat_completion_stream(&provider, &trim_context(&messages)) {
+            Ok(StreamOutcome::ToolCall { fc, tool_call_id }) => {
+                let cmd = serde_json::from_str::<serde_json::Value>(&fc.arguments)
+                    .ok()
+                    .and_then(|v| v["command"].as_str().map(|s| s.to_string()))
+                    .unwrap_or_else(|| fc.arguments.trim_matches('"').to_string());
+
+                println!("\x1b[2m\x1b[38;5;244m$ {}\x1b[0m", cmd);
+                let result = run_bash(&cmd);
+                if !result.is_empty() {
+                    println!("\x1b[2m\x1b[38;5;244m{}\x1b[0m", truncate_output(&result));
+                }
+
+                let tcid = tool_call_id.unwrap_or_else(|| "call_0".to_string());
+                messages.push(RequestMessage {
+                    role: "assistant".into(),
+                    content: None,
+                    tool_call_id: None,
+                    name: None,
+                    tool_calls: Some(vec![serde_json::json!({
+                        "id": tcid,
+                        "type": "function",
+                        "function": { "name": fc.name, "arguments": fc.arguments }
+                    })]),
+                });
+                messages.push(RequestMessage {
+                    role: "tool".into(),
+                    content: Some(result),
+                    tool_call_id: Some(tcid),
+                    name: None,
+                    tool_calls: None,
+                });
+            }
+            Ok(StreamOutcome::Complete(content)) => {
+                let clean = content
+                    .replace("<|FunctionCallBegin|>", "")
+                    .replace("<|FunctionCallEnd|>", "")
+                    .trim()
+                    .to_string();
+                return Ok(clean);
+            }
+            Err(e) => return Err(e),
+        }
+    }
 }
 
 // ============================================================
@@ -511,12 +769,24 @@ fn print_repl_help() {
 }
 
 fn clear_screen() {
-    let _ = Command::new("cmd").args(["/c", "cls"]).status();
+    let (kind, args) = platform::clear_screen();
+    if kind == "__ansi__" {
+        // Unix：直接写 ANSI 清屏码
+        let _ = io::stdout().write_all(args[0].as_bytes());
+        let _ = io::stdout().flush();
+    } else {
+        // Windows：cmd /c cls
+        let mut cmd = Command::new(kind);
+        cmd.args(&args);
+        let _ = cmd.status();
+    }
 }
 
 /// 交互式选择器：↑↓/jk 切换，Enter 确认，Esc 取消
 fn select_provider(all: &[AiProvider], current: &str) -> Option<usize> {
-    if all.len() <= 1 { return None; }
+    if all.len() <= 1 {
+        return None;
+    }
     let mut sel = all.iter().position(|p| p.name == current).unwrap_or(0);
     execute!(io::stdout(), Hide).ok()?;
     enable_raw_mode().ok()?;
@@ -557,6 +827,80 @@ fn select_provider(all: &[AiProvider], current: &str) -> Option<usize> {
     result
 }
 
+// ============================================================
+// 上下文裁剪（节省 token，同时尽量保留准确性）
+// ============================================================
+
+/// 上下文总字符预算。超过后开始裁剪最旧的纯对话消息。
+/// 估算方式：约 1 token ≈ 2~4 字符，故取保守值 4 字符/token。
+/// 120k 字符 ≈ 最多约 30k token，落在常见模型上下文窗口内，
+/// 又给工具结果和最近对话留足空间。
+const MAX_CTX_CHARS: usize = 120_000;
+
+/// 返回给定消息估算的字符数（tokens ≈ chars/4）。
+fn msg_chars(m: &RequestMessage) -> usize {
+    let mut n = m.content.as_deref().map_or(0, |s| s.len());
+    if let Some(tcs) = &m.tool_calls {
+        for tc in tcs {
+            n += tc["function"]["arguments"].as_str().map_or(0, |s| s.len());
+        }
+    }
+    n
+}
+
+/// 上下文裁剪：在发送请求前调用，在 token 预算内尽量保留准确性。
+///
+/// 策略（由保准到宽松）：
+/// 1. system（index 0）永远保留。
+/// 2. 从最新消息往回收集，优先保留最近的、工具相关的消息——
+///    这些是 AI 回答当前问题的依据，准确性最好。
+/// 3. 用字符预算兜底，保证裁剪后总大小绝不超过 MAX_CTX_CHARS。
+/// 4. 若某条消息单条就超预算，丢弃它（但最新一条 user 提问除外，强制保留）。
+fn trim_context(messages: &[RequestMessage]) -> Vec<RequestMessage> {
+    if messages.len() <= 1 {
+        return messages.to_vec();
+    }
+
+    let total: usize = messages.iter().map(msg_chars).sum();
+    if total <= MAX_CTX_CHARS {
+        return messages.to_vec();
+    }
+
+    // system 无条件保留
+    let mut out: Vec<RequestMessage> = Vec::with_capacity(messages.len());
+    out.push(messages[0].clone());
+    let mut budget = MAX_CTX_CHARS.saturating_sub(msg_chars(&messages[0]));
+
+    // 从最新往回收集，填满预算。优先保留最近的工具相关消息。
+    let mut recent: Vec<RequestMessage> = Vec::new();
+    for m in messages[1..].iter().rev() {
+        let c = msg_chars(m);
+        if c > budget {
+            continue; // 单条超预算
+        }
+        budget -= c;
+        recent.push(m.clone());
+    }
+
+    // 兜底：最新一条 user 提问必须保留（若被上面的预算判断丢弃）
+    if let Some(last) = messages.last() {
+        if last.role == "user" && !recent.iter().any(|m| m == last) {
+            // 把预算里最小的几条顶掉，也要保住提问
+            if recent.iter().any(|m| m.role != "user") {
+                if let Some(pos) = recent.iter().position(|m| m.role != "user") {
+                    recent.remove(pos);
+                }
+            }
+            recent.push(last.clone());
+        }
+    }
+
+    // recent 是倒序，反转成时间正序
+    recent.reverse();
+    out.extend(recent);
+    out
+}
+
 /// 启动 AI 交互式 REPL
 pub fn run_repl(initial: AiProvider, all_providers: &mut Vec<AiProvider>) -> Result<(), String> {
     let mut current = initial;
@@ -570,7 +914,7 @@ pub fn run_repl(initial: AiProvider, all_providers: &mut Vec<AiProvider>) -> Res
     let mut messages: Vec<RequestMessage> = Vec::new();
     messages.push(RequestMessage {
         role: "system".into(),
-        content: Some(SYSTEM_PROMPT.into()),
+        content: Some(system_prompt()),
         tool_call_id: None,
         name: None,
         tool_calls: None,
@@ -616,17 +960,24 @@ pub fn run_repl(initial: AiProvider, all_providers: &mut Vec<AiProvider>) -> Res
                             .map(|i| all_providers[i].name.clone())
                     };
                     if let Some(ref name) = new_name {
-                        if *name != current.name
-                            && all_providers.iter().any(|p| p.name == *name)
-                        {
-                            for ap in all_providers.iter_mut() { ap.default = false; }
+                        if *name != current.name && all_providers.iter().any(|p| p.name == *name) {
+                            for ap in all_providers.iter_mut() {
+                                ap.default = false;
+                            }
                             if let Some(ap) = all_providers.iter_mut().find(|ap| ap.name == *name) {
                                 ap.default = true;
                             }
                             crate::config::Config::load().set_default(name);
-                            current = all_providers.iter().find(|ap| ap.name == *name).unwrap().clone();
+                            current = all_providers
+                                .iter()
+                                .find(|ap| ap.name == *name)
+                                .unwrap()
+                                .clone();
                             messages.truncate(1);
-                            println!("\x1b[2m已切换到 \x1b[0m\x1b[38;5;208m{}\x1b[0m \x1b[2m({})\x1b[0m", current.name, current.model);
+                            println!(
+                                "\x1b[2m已切换到 \x1b[0m\x1b[38;5;208m{}\x1b[0m \x1b[2m({})\x1b[0m",
+                                current.name, current.model
+                            );
                         }
                     }
                 }
@@ -649,7 +1000,8 @@ pub fn run_repl(initial: AiProvider, all_providers: &mut Vec<AiProvider>) -> Res
 
         // 工具调用循环（流式 SSE）
         loop {
-            match chat_completion_stream(&current, &messages) {
+            // 每次请求前做上下文裁剪，控制 token 增长
+            match chat_completion_stream(&current, &trim_context(&messages)) {
                 Ok(StreamOutcome::ToolCall { fc, tool_call_id }) => {
                     // 从 arguments 中提取 command 参数
                     let cmd = serde_json::from_str::<serde_json::Value>(&fc.arguments)
@@ -715,4 +1067,171 @@ pub fn run_repl(initial: AiProvider, all_providers: &mut Vec<AiProvider>) -> Res
     }
 
     Ok(())
+}
+
+// ============================================================
+// 单元测试：上下文裁剪
+// ============================================================
+
+#[cfg(test)]
+mod context_tests {
+    use super::*;
+
+    fn user(c: &str) -> RequestMessage {
+        RequestMessage {
+            role: "user".into(),
+            content: Some(c.into()),
+            tool_call_id: None,
+            name: None,
+            tool_calls: None,
+        }
+    }
+    fn assistant(c: &str) -> RequestMessage {
+        RequestMessage {
+            role: "assistant".into(),
+            content: Some(c.into()),
+            tool_call_id: None,
+            name: None,
+            tool_calls: None,
+        }
+    }
+    fn tool(id: &str, c: &str) -> RequestMessage {
+        RequestMessage {
+            role: "tool".into(),
+            content: Some(c.into()),
+            tool_call_id: Some(id.into()),
+            name: None,
+            tool_calls: None,
+        }
+    }
+    #[test]
+    fn small_context_is_untouched() {
+        // 小上下文不裁剪，原样返回
+        let mut v = vec![RequestMessage {
+            role: "system".into(),
+            content: Some("sys".into()),
+            tool_call_id: None,
+            name: None,
+            tool_calls: None,
+        }];
+        v.extend([user("hi"), assistant("hi")]);
+        let out = trim_context(&v);
+        assert_eq!(out, v);
+    }
+
+    #[test]
+    fn drops_old_pure_chat_keeps_latest_user() {
+        // 制造超预算：大量旧纯对话 + 最新的 user
+        let old: Vec<RequestMessage> = (0..2000)
+            .map(|i| {
+                if i % 2 == 0 {
+                    user("x")
+                } else {
+                    assistant("y")
+                }
+            })
+            .collect();
+        let mut v = vec![RequestMessage {
+            role: "system".into(),
+            content: Some("sys".into()),
+            tool_call_id: None,
+            name: None,
+            tool_calls: None,
+        }];
+        v.extend(old);
+        v.push(user("最新问题"));
+        let out = trim_context(&v);
+        // system 保留
+        assert_eq!(out[0].role, "system");
+        // 最新 user 保留
+        assert!(out.iter().any(|m| m.content.as_deref() == Some("最新问题")));
+        // 总长度低于预算
+        let total: usize = out.iter().map(msg_chars).sum();
+        assert!(total <= MAX_CTX_CHARS);
+    }
+
+    #[test]
+    fn keeps_recent_tool_results() {
+        let mut v = vec![RequestMessage {
+            role: "system".into(),
+            content: Some("sys".into()),
+            tool_call_id: None,
+            name: None,
+            tool_calls: None,
+        }];
+        // 超预算的旧工具结果 + 最新一个工具结果
+        for i in 0..5000 {
+            let c = format!("result_{}", i);
+            // 大内容模拟
+            let big = format!("{:0<2000}", c);
+            v.push(tool(&format!("t{}", i), &big));
+        }
+        // 最新的工具结果应被保留（在最近回合内）
+        let last_tool = tool("t_last", "最新结果");
+        let q = user("当前问题");
+        v.push(q.clone());
+        v.push(last_tool.clone());
+        let out = trim_context(&v);
+        assert_eq!(out[0].role, "system");
+        assert!(out.iter().any(|m| m == &last_tool));
+        let total: usize = out.iter().map(msg_chars).sum();
+        assert!(total <= MAX_CTX_CHARS);
+    }
+
+    #[test]
+    fn keeps_recent_tool_cycle() {
+        // 造一条超预算的旧历史
+        let old: Vec<RequestMessage> = (0..3000)
+            .map(|i| {
+                if i % 2 == 0 {
+                    user(&format!("{:0<3000}", "旧问"))
+                } else {
+                    assistant(&format!("{:0<3000}", "旧答"))
+                }
+            })
+            .collect();
+        let mut v = vec![RequestMessage {
+            role: "system".into(),
+            content: Some("sys".into()),
+            tool_call_id: None,
+            name: None,
+            tool_calls: None,
+        }];
+        v.extend(old);
+        // 最近一个完整回合：提问 -> 工具调用 -> 工具结果 -> 最终回答
+        let q = user("当前问题");
+        let call = assistant_toolcall_help("ls.exe");
+        let res = tool("call_1", "文件列表...");
+        let ans = assistant("这是 ls 的用法说明...");
+        v.push(q.clone());
+        v.push(call.clone());
+        v.push(res.clone());
+        v.push(ans.clone());
+
+        let out = trim_context(&v);
+        assert_eq!(out[0].role, "system");
+        // 当前问提、工具调用、工具结果、最终回答全部保留
+        assert!(out.iter().any(|m| m == &q));
+        assert!(out.iter().any(|m| m == &call));
+        assert!(out.iter().any(|m| m == &res));
+        assert!(out.iter().any(|m| m == &ans));
+        let total: usize = out.iter().map(msg_chars).sum();
+        assert!(total <= MAX_CTX_CHARS);
+    }
+
+    // 构造带 tool_calls 的助手消息
+    fn assistant_toolcall_help(cmd: &str) -> RequestMessage {
+        let calls = serde_json::json!({
+            "id": "call_1",
+            "type": "function",
+            "function": { "name": "bash", "arguments": format!(r#"{{"command":"{}"}}"#, cmd) }
+        });
+        RequestMessage {
+            role: "assistant".into(),
+            content: None,
+            tool_call_id: None,
+            name: None,
+            tool_calls: Some(vec![calls]),
+        }
+    }
 }

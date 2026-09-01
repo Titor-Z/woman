@@ -1,8 +1,8 @@
 [package]
 name = "woman"
-version = "0.8.0"
+version = "0.11.0"
 edition = "2021"
-description = "Windows man — 统一手册查看工具"
+description = "全平台 man 替代 — 统一手册查看工具"
 
 [dependencies]
 dirs = "5"

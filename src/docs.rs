@@ -1,8 +1,8 @@
 // docs.rs — 管理 ~/.woman/docs/ 和 ~/.woman/cache/ 目录
 // 负责文档的读取、元信息解析、来源标注、缓存读写
 
-use std::path::{Path, PathBuf};
 use std::fs;
+use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 // ============================================================
@@ -13,12 +13,14 @@ use std::time::SystemTime;
 pub struct DocMeta {
     /// 文档标题
     pub title: Option<String>,
-    /// 来源："manual"（人工）| "ai-generated"（AI 生成）| "cache"（缓存）| "help"（--help）
+    /// 来源："manual"（人工）| "ai-generated"（AI 生成）| "ai-enhanced"（AI 增强）| "cache"（缓存）| "help"（--help）
     pub source: Option<String>,
     /// 生成/抓取日期
     pub fetched: Option<String>,
     /// 工具版本
     pub tool_version: Option<String>,
+    /// 命令类型：coreutils / powershell / windows
+    pub cmd_type: Option<String>,
 }
 
 impl DocMeta {
@@ -29,6 +31,7 @@ impl DocMeta {
             source: Some(source.to_string()),
             fetched: None,
             tool_version: None,
+            cmd_type: None,
         }
     }
 }
@@ -57,16 +60,6 @@ impl Doc {
         })
     }
 
-    /// 从 --help 原始输出创建文档对象
-    pub fn from_help(name: &str, help_text: &str) -> Doc {
-        let body = format!("`{} --help` 输出：\n\n```\n{}\n```", name, help_text.trim());
-        Doc {
-            meta: DocMeta::with_source("help"),
-            body,
-            path: None,
-        }
-    }
-
     /// 从缓存内容创建文档对象
     pub fn from_cache(content: &str, meta: DocMeta) -> Doc {
         Doc {
@@ -90,7 +83,11 @@ impl Doc {
         let rest = &content[3..];
         let end = rest.find("\n---").unwrap_or(rest.len());
         let front_raw = &rest[..end];
-        let body_start = if end + 4 < rest.len() { end + 4 } else { rest.len() };
+        let body_start = if end + 4 < rest.len() {
+            end + 4
+        } else {
+            rest.len()
+        };
         let body = rest[body_start..].trim().to_string();
 
         // 解析键值对
@@ -104,6 +101,7 @@ impl Doc {
                     "source" => meta.source = Some(val),
                     "fetched" | "generated" => meta.fetched = Some(val),
                     "tool_version" => meta.tool_version = Some(val),
+                    "type" => meta.cmd_type = Some(val),
                     _ => {}
                 }
             }
@@ -115,34 +113,48 @@ impl Doc {
     /// 生成来源徽标（显示在文档顶部）
     pub fn source_badge(&self) -> String {
         let source = self.meta.source.as_deref().unwrap_or("unknown");
+        let type_tag = self
+            .meta
+            .cmd_type
+            .as_deref()
+            .map(|t| format!(" · [{}]", t))
+            .unwrap_or_default();
         match source {
             "manual" => {
                 let date = self.meta.fetched.as_deref().unwrap_or("");
                 if date.is_empty() {
-                    "📝 人工编写".to_string()
+                    format!("📝 人工编写{}", type_tag)
                 } else {
-                    format!("📝 人工编写 · {}", date)
+                    format!("📝 人工编写 · {}{}", date, type_tag)
                 }
             }
             "ai-generated" => {
                 let date = self.meta.fetched.as_deref().unwrap_or("");
                 if date.is_empty() {
-                    "🤖 AI 生成".to_string()
+                    format!("🤖 AI 生成{}", type_tag)
                 } else {
-                    format!("🤖 AI 生成 · {}", date)
+                    format!("🤖 AI 生成 · {}{}", date, type_tag)
+                }
+            }
+            "ai-enhanced" => {
+                let date = self.meta.fetched.as_deref().unwrap_or("");
+                if date.is_empty() {
+                    format!("✨ AI 增强{}", type_tag)
+                } else {
+                    format!("✨ AI 增强 · {}{}", date, type_tag)
                 }
             }
             "cache" => {
                 let source_url = self.meta.title.as_deref().unwrap_or("在线源");
                 let date = self.meta.fetched.as_deref().unwrap_or("");
                 if date.is_empty() {
-                    format!("📦 缓存 · {}", source_url)
+                    format!("📦 缓存 · {}{}", source_url, type_tag)
                 } else {
-                    format!("📦 缓存 · {} · {}", source_url, date)
+                    format!("📦 缓存 · {} · {}{}", source_url, date, type_tag)
                 }
             }
-            "help" => "⚡ --help 原始输出".to_string(),
-            _ => format!("🔗 {}", source),
+            "help" => format!("⚡ --help 原始输出{}", type_tag),
+            _ => format!("🔗 {}{}", source, type_tag),
         }
     }
 }
@@ -164,18 +176,30 @@ pub fn find_in_docs(name: &str) -> Option<Doc> {
 }
 
 /// 在 cache/ 目录下查找文档
+/// 新缓存存 `.txt`；兼容读取旧 `.md` 缓存，避免丢失历史数据
 pub fn find_in_cache(name: &str) -> Option<Doc> {
-    let path = home_dir().join("cache").join(format!("{}.md", name));
-    Doc::from_file(&path)
+    let home = home_dir();
+    let txt_path = home.join("cache").join(format!("{}.txt", name));
+    if txt_path.exists() {
+        return Doc::from_file(&txt_path);
+    }
+    let md_path = home.join("cache").join(format!("{}.md", name));
+    Doc::from_file(&md_path)
 }
 
-/// 保存内容到缓存目录
-pub fn save_to_cache(name: &str, content: &str, source_url: &str) -> Result<(), String> {
-    let path = home_dir().join("cache").join(format!("{}.md", name));
+/// 保存内容到缓存目录（统一存 `.txt`，写入源类型元信息）
+pub fn save_to_cache(
+    name: &str,
+    content: &str,
+    source_url: &str,
+    cmd_type: &str,
+) -> Result<(), String> {
+    let path = home_dir().join("cache").join(format!("{}.txt", name));
     let header = format!(
-        "---\ntitle: {}\nsource: cache\nfetched: {}\n---\n\n",
+        "---\ntitle: {}\nsource: cache\nfetched: {}\ntype: {}\n---\n\n",
         source_url,
-        current_date()
+        current_date(),
+        cmd_type
     );
     let full = format!("{}{}", header, content);
     fs::write(&path, &full).map_err(|e| format!("写入缓存失败：{}", e))
@@ -203,8 +227,20 @@ pub(crate) fn current_date() -> String {
     }
 
     let leap = is_leap(y);
-    let month_days = [31, if leap { 29 } else { 28 }, 31, 30, 31, 30,
-                      31, 31, 30, 31, 30, 31];
+    let month_days = [
+        31,
+        if leap { 29 } else { 28 },
+        31,
+        30,
+        31,
+        30,
+        31,
+        31,
+        30,
+        31,
+        30,
+        31,
+    ];
     let mut m = 0;
     for &md in &month_days {
         if remaining < md {

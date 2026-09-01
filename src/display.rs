@@ -1,10 +1,5 @@
 // display.rs — 终端直接输出渲染（非 TUI 场景）
 
-/// 渲染纯文本
-pub fn render_plain(text: &str) {
-    println!("{}", text);
-}
-
 /// 渲染提示信息
 pub fn render_hint(text: &str) {
     println!("💡 {}", text);
@@ -76,15 +71,24 @@ pub fn ansi_format(text: &str) -> String {
         } else if trimmed.starts_with("- ") || trimmed.starts_with("* ") {
             // 无序列表
             format!("• {}", format_inline(&trimmed[2..]))
-        } else if trimmed.starts_with("1.") || trimmed.starts_with("2.")
-            || trimmed.starts_with("3.") || trimmed.starts_with("4.")
-            || trimmed.starts_with("5.") || trimmed.starts_with("6.")
-            || trimmed.starts_with("7.") || trimmed.starts_with("8.")
-            || trimmed.starts_with("9.") || trimmed.starts_with("0.")
+        } else if trimmed.starts_with("1.")
+            || trimmed.starts_with("2.")
+            || trimmed.starts_with("3.")
+            || trimmed.starts_with("4.")
+            || trimmed.starts_with("5.")
+            || trimmed.starts_with("6.")
+            || trimmed.starts_with("7.")
+            || trimmed.starts_with("8.")
+            || trimmed.starts_with("9.")
+            || trimmed.starts_with("0.")
         {
             // 有序列表
             let dot = trimmed.find('.').unwrap_or(1);
-            format!("{} {}", &trimmed[..=dot], format_inline(&trimmed[dot+1..].trim()))
+            format!(
+                "{} {}",
+                &trimmed[..=dot],
+                format_inline(&trimmed[dot + 1..].trim())
+            )
         } else {
             format_inline(raw)
         };
@@ -103,8 +107,7 @@ fn is_hrule(s: &str) -> bool {
         return false;
     }
     let first = no_spaces.chars().next().unwrap();
-    (first == '-' || first == '*' || first == '_')
-        && no_spaces.chars().all(|c| c == first)
+    (first == '-' || first == '*' || first == '_') && no_spaces.chars().all(|c| c == first)
 }
 
 /// 行内格式化：`code` **加粗** *斜体* ~~删除线~~ [文字](链接)
@@ -152,7 +155,8 @@ fn format_inline(text: &str) -> String {
         }
 
         // *斜体*（只在前后字符不是 * 时匹配）
-        if chars[i] == '*' && (i == 0 || chars[i - 1] != '*')
+        if chars[i] == '*'
+            && (i == 0 || chars[i - 1] != '*')
             && (i + 1 >= chars.len() || chars[i + 1] != '*')
         {
             if let Some(end) = find_closing(&chars, i + 1, "*") {
@@ -208,7 +212,10 @@ fn find_closing(chars: &[char], start: usize, pattern: &str) -> Option<usize> {
 
 /// 查找单个字符
 fn find_char(chars: &[char], start: usize, target: char) -> Option<usize> {
-    chars[start..].iter().position(|&c| c == target).map(|p| start + p)
+    chars[start..]
+        .iter()
+        .position(|&c| c == target)
+        .map(|p| start + p)
 }
 
 /// 先 ansi_format 再 println（快捷函数）

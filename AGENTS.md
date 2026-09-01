@@ -1,5 +1,67 @@
 # Changelog
 
+## [2026.09.01] — v0.11.0 跨平台：全平台 man 替代（Windows / macOS / Linux）
+- 从 Windows 专用改为**全平台 man 替代品**，mac/linux 也能用
+- 新增**统一平台抽象层 `src/platform.rs`**：把全部 `cfg!(target_os)` 分叉收敛到一处，其余模块调用它
+  - 平台差异映射：curl→curl.exe/curl；shell→`pwsh -NoProfile -Command`/`sh -c`；定位→where.exe/which；清屏→cmd /c cls/ANSI
+- **OS 检测**用 `cfg!(target_os)`（编译期硬保证），不引入自定义环境变量
+- **AI shell 三平台可用**：Windows pwsh / Unix sh，不降级禁用；`run_bash` 用 `platform::shell_runner()`
+- 新增 `is_dangerous()`：危险命令黑名单**分平台**（Win 拦 rm -rf /、rd /s /q、format 等；Unix 拦系统破坏性惯用法）
+- **AI prompt 分平台**：`system_prompt()`/`tools_json()` 两个 cfg 实体（Win 提 pwsh/.exe/Get-Help；Unix 提 sh/man/whatis）
+- **coreutils 分类**：Windows 探测 `coreutils.exe`；Unix 直接用系统二进制（which 探测），系统命令即 man 目标
+- 新增 **man / whatis Unix 源** `fetch_from_man`；`run_help` 平台感知（`/?` 仅 Windows）；Get-Help 编译期 `#[cfg(windows)]` 排除
+- skill 模板通用化（`/?`/.exe/MS Learn 标注平台通用措辞），同步磁盘 `~/.woman/skills/manual.md`
+- 非 Windows 上 PowerShell/Windows 专属源**编译期 `#[cfg(windows)]` 排除**，无死代码（删 Unix stub，函数加 cfg gate）
+- **变更详情**：[Taolun → 2026-09-01 跨平台](#2026-09-01--跨平台全平台-man-替代) | [项目进度 → 已完成](#已完成)
+
+## [2026.09.01] — v0.10.0 woman init：交互式初始化向导 + models.dev 目录（本地缓存离线可用）
+- 新增 `woman init`：交互式初始化向导——选厂商 → 选模型 → 输 API Key → 写入 config.json
+- 目录来源 = **models.dev**（opencode / pi / deepseek-harness 同源，MIT）：`curl.exe` 拉取 `https://models.dev/api.json`
+- 目录**本地缓存离线可用**：缓存 `~/.woman/models/catalog.json`；三级——有缓存直接用（离线）、无缓存拉取、拉取失败且无缓存才报错
+- `init --refresh` 强制重拉目录；`init --reset` 恢复默认 config + skill 模板；`--reset --wipe` 另清 docs/cache
+- 向导可**重复**进入（追加/替换提供者，兼容现有多提供者 ai[]），新提供者自动设 default
+- **OpenAI 兼容过滤**：仅 `npm == "@ai-sdk/openai-compatible"` 且带 `api` 的厂商（真实目录 212 家中约 172 家）直接用 `AiProvider`
+- 解析用**精简 serde 结构**（`#[serde(default)]`，忽略未知字段），不引入完整巨型结构
+- 新增 `prompt_masked()`（raw 模式 `*` 掩码输入）+ `prompt_line()`；厂商/模型选择复用 mdr 卡片选择器 `tui::pick_entries`
+- 新增 `src/catalog.rs`、`src/init.rs`；`Config::models_dir()/catalog_path()/add_provider()`；`init` 子命令 + `--refresh/--reset/--wipe` 解析
+- 真实目录解析实测：212 家厂商 / 172 家 OpenAI 兼容 / 7478 个模型，全部通过
+- **变更详情**：[Taolun → 2026-09-01 woman init](#2026-09-01--woman-init交互式初始化-向导--modelsdev-目录) | [项目进度 → 已完成](#已完成)
+
+## [2026.09.01] — v0.9.1 手册详细化 + 本地选项校对（AI 校验）
+- docs 手册变为**详细完整手册**：skill 模板从「重点讲常用、不罗列冷门」改为**列出全部选项/参数**（完整性优先，方便离线参考）
+- `fetch_source` 返回**双资料** `FetchedSource`：本地 `--help`/`/?`（本机选项真值）+ 在线全文（archlinux / MS Learn / Get-Help 详细说明）；coreutils 现改为 `--help` 与 archlinux **同时取**，不再 `--help` 成功即短路
+- **在线选项按本地校对（AI 校验）**：`enhance()` 把本地 --help 与在线全文都喂给 AI，由 AI 对比选项；在线有、本机 `--help` 未出现的选项 → 保留并标注 **『本机此版本不支持』**
+- 无 AI key 时也抓在线全文合并缓存展示，保证离线 `woman <name>` 有详细手册（本地 `--help` 短输出仅兜底）
+- cache 存合并后的完整原始资料（本地 + 在线），无 AI / AI 失败时兜底展示 `combined`
+- skill 测试新增「本地选项校对 + 完整性」断言
+- **变更详情**：[Taolun → 2026-09-01 手册详细化](#2026-09-01--手册详细化--本地选项校对ai-校验) | [项目进度 → 已完成](#已完成)
+
+## [2026.09.01] — v0.9.0 重构为 man 替代品 + AI 可选智能渲染层
+- 单二进制 + 单命令对齐 man：`woman <name>` 即手册查询；新增 `woman -q "<问题>"` 一次性 agent 问答；保留 `woman ai`；**移除** `search`/`generate`/`-s`
+- 全自动对齐 man：docs 未命中 → 按类型分类（coreutils/powershell/windows）→ 取源 → AI 整理写 docs/ → 展示；取消手动 search/generate
+- AI 作为可选智能渲染层：有 key → 整理成结构化中文手册（存 docs/）；无 key → 直接展示原始内容（纯 man 完全可用）
+- 新增源：`Get-Help`（PowerShell）；`ls.exe`/`ls` 均归 coreutils（分类去 `.exe`）
+- 新增 `src/skill.rs`：手册风格解耦，`~/.woman/skills/manual.md` 章节模板 + 整理指令，用户可自定义多风格
+- 新增 mdr 卡片式选择器 `tui::pick_entries`：多类型命中时让用户选择（coreutils > windows > powershell 为取消兜底）
+- 数据模型：docs=`*.md`（人类可读）、cache 改 `.txt` + 兼容读取旧 `.md`；coreutils 清单缓存 `~/.woman/coreutils-list.txt`
+- docs frontmatter 增加 `type`；`source: ai-enhanced` 徽标
+- **变更详情**：[Taolun → 2026-09-01 重构](#2026-09-01--woman-重构为-man-替代品--ai-可选智能渲染层) | [项目进度 → 已完成](#已完成)
+
+## [2026.07.21] — v0.8.2 上下文压缩省 token
+- 用户关心 token 浪费且要求保留准确性
+- `run_bash` 工具输出截断 50000 → 12000 字符（AI 只需提炼要点，不损失准确性，单次省大量 token）
+- 新增 `trim_context()`：发送请求前自动裁剪上下文，用字符预算（≈120k 字符 ≈ 30k token）兜底
+  - system 永远保留；从最新往回收集，优先保留最近的工具调用链与提问
+  - 单条超预算的消息丢弃，但最新 user 提问强制保留
+- 新增 4 条上下文裁剪单测
+- **变更详情**：[Taolun → 2026-07-21 上下文压缩](#2026-07-21--上下文压缩省-token) | [项目进度 → 已完成](#已完成)
+
+## [2026.07.21] — v0.8.1 curl 请求体落盘修复
+- 修复 `os error 206`（文件名或扩展名太长：Windows 命令行超 32767 字符上限）
+- 根因：`chat_completion_stream` / `chat_completion` 把整个 JSON body 用 `-d <body>` 塞进命令行，对话历史累积过长时 curl.exe 无法启动
+- 修复：新增 `write_body_file()` 把 body 写入系统临时目录，改用 `-d @file`；`remove_body_file()` 在 curl 进程结束后清理临时文件
+- **变更详情**：[Taolun → 2026-07-21 curl body 落盘](#2026-07-21--curl-body-落盘修复-os-error-206) | [项目进度 → 已完成](#已完成)
+
 ## [2026.07.21] — v0.8.0 输入框重塑
 - 新建 `src/editor.rs`：raw 模式多行行编辑器，替换 `run_repl` 的 `read_line()`
 - 支持普通字符 / CJK / 退格 / 左右上下方向键 / Home / End / Del
@@ -85,6 +147,106 @@
 
 # Taolun
 
+## 2026-09-01 — 跨平台：全平台 man 替代（Windows / macOS / Linux）
+### 讨论摘要
+- 用户诉求：把 `woman` 从 Windows 专用改为**全平台 man 替代品**，让 mac/linux 也能用
+- 用户提出用「系统变量检测 OS」——经调研建议用 `cfg!(target_os)` / `std::env::consts::OS`（编译期硬保证，比自定义 env var 更稳），coreutils「是否装了」用**二进制探测**（`which`/`where`）运行时判断——即用户「Win 上检测 coreutils」思路的可靠落地
+- 四项决策（用户确认）：
+  1. **范围**：全平台 man 替代（不满足于最小编译跑通）
+  2. **OS 检测**：`cfg!`/`std::env::consts::OS`，不引入自定义环境变量
+  3. **AI shell**：三平台都让 AI 用 shell 执行（Windows pwsh / Unix sh），不降级禁用
+  4. **coreutils**：Win 探测 `coreutils.exe`，Unix 直接用系统二进制（系统命令即是 man 目标），不再额外探测 GNU coreutils 套件
+- **核心方案：单一平台抽象层 `src/platform.rs`**，把所有 `cfg!`/OS 分叉收敛到一处，返回平台相关常量 + 探测函数，其余模块调用它，避免散落 OS 分支
+  - 平台差异映射：curl→curl.exe/curl；shell→pwsh -NoProfile -Command /$SHELL·sh -c；定位→where.exe/which；清屏→cmd /c cls/ANSI；coreutils→探测/系统二进制；帮助→--help·/? /--help·man；系统源→Get-Help·MS Learn/man·archlinux·WHAT IS；PowerShell 分类→启用/停用
+- 非 Windows 上 PowerShell/Windows 专属源**编译期 `#[cfg(windows)]` 排除**（干净无死代码，虽是运行时禁用也可行但留下死代码）
+- 已验证可跨平台的部分：依赖（dirs/serde/ratatui/crossterm）、路径（全用 PathBuf::join）、TUI/编辑器（crossterm）
+- 分步实施：1) platform.rs 2) catalog curl 3) fetch 分类/取源 4) ai shell+prompt+黑名单 5) skill 模板 6) main 7) 版本+AGENTS 8) 编译实测
+
+### 涉及文件
+- `src/platform.rs`（新建）— 平台枚举 + curl/shell/which/coreutils/帮助/系统源抽象
+- `src/fetch.rs` — curl 平台化、coreutils 分类、Get-Help(#[cfg(windows)])、新增 man/WHAT IS 源、run_help 去 /?
+- `src/ai.rs` — run_bash shell 分平台、SYSTEM_PROMPT/TOOLS 平台化、clear_screen、危险命令黑名单分平台
+- `src/catalog.rs` — curl 平台化
+- `src/skill.rs` — 默认模板平台通用化
+- `src/main.rs` — 按平台裁剪取源
+- `AGENTS.md` — 更新
+
+### 相关变更
+- [Changelog → v0.11.0](#20260901--v0110-跨平台全平台-man-替代) | [项目进度 → 已完成](#已完成)
+
+## 2026-09-01 — woman init：交互式初始化向导 + models.dev 目录（本地缓存离线可用）
+### 讨论摘要
+- 用户诉求：为开源后用户提供 `init` 命令（初始化 + 重置），并希望像 opencode / pi / deepseek-harness 那样用**开源 LLM 厂商/模型目录**做交互式选择厂商+模型
+- 确认目录来源 = **models.dev**（MIT，opencode/pi/deepseek-harness 同源）：`curl https://models.dev/api.json`
+  - 顶层 `HashMap<providerId, Provider>`（212 家 / 7478 模型）；Provider 含 `id/name/npm/doc/api?/models`；Model 含 `id/name/limit/cost/modality/status/reasoning/tool_call`
+  - **OpenAI 兼容过滤**：`npm == "@ai-sdk/openai-compatible"` 且含 `api`（约 170 家）才直接适配 woman 的 `AiProvider`（api_base+api_key+model）；anthropic/google/groq 等原生 SDK 过滤/提示需经 OpenAI 兼容网关
+  - 文件 ~4.4MB 单行，`serde_json::from_str` 即可
+- 目录**本地缓存离线可用**：缓存 `~/.woman/models/catalog.json`；三级——有缓存直接用（离线）、无缓存拉取、拉取失败且无缓存才报错（提示先联网跑一次）
+- 向导可**重复**进入（追加/更换提供者，兼容现有多提供者 ai[]）；无配置自动进向导，`--interactive` 强制重进
+- 命令面：`woman init`（向导）、`init --refresh`（重拉目录）、`init --reset`（恢复默认 config+skill）、`init --reset --wipe`（另清 docs/cache）
+- 解析用**精简 serde 结构**（`#[serde(default)]`，忽略未知字段），不引入完整巨型结构
+- 分步实施：1) config 路径+add_provider 2) catalog 拉取解析 3) init 向导+掩码输入 4) main 解析+help 5) 版本+AGENTS 6) 编译测试实测
+
+### 涉及文件
+- `src/config.rs` — `models_dir()`/`catalog_path()`；`Config::add_provider()`（去重+设 default+落盘）
+- `src/catalog.rs`（新建）— models.dev 目录缓存/拉取/精简 serde 解析
+- `src/init.rs`（新建）— `run_init()` 向导 + `prompt_masked()`/`prompt_line()`
+- `src/main.rs` — `init` + `--refresh/--reset/--wipe` 解析 + help
+- `AGENTS.md` — 更新
+
+### 相关变更
+- [Changelog → v0.10.0](#20260901--v0100-woman-init交互式初始化-向导--modelsdev-目录) | [项目进度 → 已完成](#已完成)
+
+## 2026-09-01 — 手册详细化 + 本地选项校对（AI 校验）
+### 讨论摘要
+- 用户两个诉求：
+  1. **更像手册 + 离线可用**：docs 里的手册应是「详细完整手册」，而非当前 AI 强调「重点讲常用、不罗列冷门」的摘要——列入全部选项/参数、更完整示例，作为离线参考
+  2. **在线手册按本地命令选项来**：coreutils 本机构建不一定 100% 兼容在线 man page 列出的所有选项，在线手册应校对本地的
+- 三项确认（用户选择）：
+  - docs 形态 = **详细完整手册**（收录全部选项，最像 man；代价是文件更大、AI 每次生成耗更多 token）
+  - 在线有、本机 --help 不支持的选项 = **保留并标注『本机此版本不支持』**（透明告知差异，而非静默省略）
+  - 无 AI key 时 = **离线也抓在线全文**（取源时 coreutils 同时抓 archlinux 全文缓存展示，本地短 `--help` 仅兜底），保证离线 `woman <name>` 也有详细手册
+  - 本地选项校对实现 = **AI 校对**（把本地 --help 与在线全文都喂给 AI，由 AI 对比选项并标注不支持项，复用现有 enhance/chat_completion；放弃 Rust 启发式解析 man 选项，因其不可靠）
+- 核心设计变更：`fetch_source` 返回值从 `(source_label, text)` 扩展为可携带**双资料**（本地 --help = 选项真值 + 在线全文 = 详细说明）；coreutils 此前 `--help` 成功就不抓 archlinux，需改为两者都取
+- 分步实施：1) fetch 双资料 FetchedSource 2) skill 详细模板 + 校对指令 3) enhance 接双资料 4) main 适配 5) AGENTS 记录 6) 编译测试实测
+
+### 涉及文件
+- `src/fetch.rs` — `FetchedSource` 结构 + `fetch_source` 双资料取源
+- `src/skill.rs` — 详细完整手册模板 + 「本地选项校对」指令 + 测试
+- `src/ai.rs` — `enhance()` 接受本地/在线双资料 + 拼接校对
+- `src/main.rs` — `lookup_and_show` 适配 combined 流程 + 无 AI 展示详细全文
+- `AGENTS.md` — 更新
+
+### 相关变更
+- [Changelog → v0.9.1](#20260901--v091-手册详细化--本地选项校对) | [项目进度 → 已完成](#已完成)
+
+## 2026-09-01 — woman 重构为 man 替代品 + AI 可选智能渲染层
+### 讨论摘要
+- 用户目标：把 `woman` 纯粹化为 Windows 上的 man 替代品，专为 GNU coreutils 命令 + PowerShell 指令提供服务（man 在 Windows 上不认 coreutils.exe）
+- 单二进制 + 单命令：`woman <name>` 即 man 查询，对齐 man 使用逻辑
+- AI 作为可选智能渲染层：有 key 时把原始 man 内容整理成结构化中文手册；无 key 时直接展示原始内容（纯 man，完全可用）
+- 全自动对齐 man：docs 未命中 → 分类命令（coreutils/powershell/windows）→ 取源 → AI 整理写 docs → 展示；取消手动 search/generate
+- 命令面最终确定：`woman <name>`、`woman -q "<问题>"`（一次性问答，agent 式，docs/cache 作上下文，无 key 报错）、`woman ai`（保留自由对话）；**移除** `search`/`generate`/`-s`
+- 手册风格解耦：skill 文件 `~/.woman/skills/manual.md`（章节结构模板 + 给 doubao 的整理指令），用户可自定义，多风格可扩展
+- PowerShell 兼容：先 coreutils 后 `Get-Help`（新增源）；`ls.exe`/`ls` 均归 coreutils
+- 多类型冲突时用 mdr 卡片式选择器让用户选择（参考 `C:\Users\fools\Projects\mdr` 的文件选择器效果）
+- 数据模型：docs=`*.md`（整理后手册，人类可读，无 AI 直出）、cache=`.txt`（源原始副本，AI 输入 + 兜底）；coreutils 命令清单缓存到 `~/.woman/coreutils-list.txt` 供分类
+- 评估过引入 nosqlite（本地 NoSQL 数据库）存 docs/cache，后放弃：docs/cache 的价值在于"人类可读、可直接编辑的 markdown/text 文件"，这是 man 的本质，塞进二进制 .nodb 会破坏核心价值，且 woman 的访问模式（按 name 精确读写单条）用不上 nosqlite 的查询能力；nosqlite 更适合辅助层（如 -q 检索索引），当前暂不引入
+- 分步实施：1) 分类+Get-Help+coreutils清单 2) skill+enhance() 3) 重写 lookup_and_show+删 search/generate 4) -q 5) mdr 选择器 6) 收尾
+
+### 涉及文件
+- `src/fetch.rs` — `fetch_from_gethelp`、`classify_command`、coreutils 清单缓存、源选择
+- `src/docs.rs` — frontmatter 加 `type`/`tool_version`；`ai-enhanced` 徽标；cache 改 `.txt` + 旧 `.md` 兼容读取
+- `src/skill.rs`（新建） — `manual.md` 读取/默认模板
+- `src/ai.rs` — 删 `generate_docs`；新增 `enhance()`/`ask_once()`；system prompt 调整
+- `src/config.rs` — `skills_dir()`/`coreutils_list_path()`
+- `src/tui.rs` — mdr 卡片选择器
+- `src/main.rs` — 删 `search/generate/-s`；加 `-q`；重写 `lookup_and_show`
+- `AGENTS.md` — 更新
+
+### 相关变更
+- [Changelog → v0.9.0](#20260901--v090-重构为-man-替代品--ai-可选智能渲染层) | [项目进度 → 已完成](#已完成)
+
 ## 2026-07-11 — 项目启动
 ### 讨论摘要
 - 决定开发 `woman`，作为 Windows 上统一的手册查看工具，替代 Linux man
@@ -112,6 +274,36 @@
 
 # Agents
 
+## 2026-07-21 — 上下文压缩省 token
+### 讨论摘要
+- 用户关心工具浪费 token，但明确要求「保留对话准确性」
+- 分析结论：最大浪费来自「整段历史每轮全量重发」+「工具输出最大 5 万字符完整保留」
+- 方案三层，保准确优先：
+  1. 工具输出瘦身：`run_bash` 的 `MAX_OUTPUT` 50000 → 12000。AI 只需提炼要点，省 token 几乎不损失准确性，单次省最多 3.8 万字符
+  2. 新增 `trim_context()`：字符预算（120k ≈ 30k token）自动裁剪。system 永保；从最新往回收集，近工具链优先，旧纯对话先丢；最新提问强制保留
+  3. 每轮请求前调用 `trim_context(&messages)`
+- 准确性保障：裁剪只发生在超预算时；预算内原样返回；最近回合（含工具调用链）优先保留
+
+### 涉及文件
+- `src/ai.rs` — `run_bash` 截断 50000→12000；新增 `trim_context()`/`msg_chars()`；`RequestMessage` 加 `Clone`/`PartialEq`；`run_repl` 请求前调用裁剪；新增 context_tests 4 例
+
+### 相关变更
+- [Changelog → v0.8.2](#20260721--v082-上下文压缩省-token) | [项目进度 → 已完成](#已完成)
+
+## 2026-07-21 — curl body 落盘修复 os error 206
+### 讨论摘要
+- 用户反馈：执行过程中报「无法启动 curl.exe：文件名或扩展名太长 (os error 206)」
+- 根因：Windows `CreateProcess` 命令行长度上限 32767 字符。`chat_completion_stream` / `chat_completion` 直接把序列化后的 JSON body 用 `-d <body>` 作为命令行参数传给 curl.exe；当 REPL 对话历史不断累积（尤其工具调用结果很长）时，命令行超出上限导致 curl 无法启动
+- 方案：新增 `write_body_file()` 把 body 写入 `std::env::temp_dir()` 下的 `woman_body_<pid>.json`，curl 改用 `-d @file` 从文件读取；新增 `remove_body_file()` 在 curl 进程结束后删除临时文件
+- 清理时机：流式版本在 `child.wait()` 后清理（`-d @file` 是 curl 启动时读取，过早删除有竞态）；非流式 `.output()` 阻塞至完成，随后清理；spawn 失败时也清理
+- 进程内多次调用共用 `<pid>` 名，顺序执行相互覆盖安全
+
+### 涉及文件
+- `src/ai.rs` — 新增 `write_body_file()`、`remove_body_file()`；`chat_completion_stream` / `chat_completion` 的 `-d` 改为落盘方式
+
+### 相关变更
+- [Changelog → v0.8.1](#20260721--v081-curl-请求体落盘修复) | [项目进度 → 已完成](#已完成)
+
 ## 规范
 1. **三次重试原则**：同一个问题重复 3 次无法解决，强制停止，向用户详细汇报遇到的问题，等待用户解答。
 2. **全中文**：整个对话流程全部使用中文，包括 AI 思考过程输出在终端中的内容。
@@ -124,11 +316,18 @@
 
 ### 计划中
 - 自动更新检测（文档版本 vs 工具版本）
+- 旧 `.md` cache 迁移到 `.txt`（当前仅兼容读取，未做重命名迁移）
 
 ### 代办
 - （无）
 
 ### 已完成
+- [x] 跨平台全平台 man 替代（Windows/macOS/Linux）：新增 `src/platform.rs` 统一平台抽象层收敛全部 cfg! 分叉；AI shell 三平台可用（pwsh/sh）+ `is_dangerous` 分平台黑名单；`system_prompt`/`tools_json` 分平台实体；coreutils 分类（Win 探 coreutils.exe / Unix 用系统二进制）；man/whatis Unix 源；Get-Help 编译期 cfg 排除；skill 模板通用化 — [Taolun → 2026-09-01 跨平台](#2026-09-01--跨平台全平台-man-替代) | [Changelog → v0.11.0](#20260901--v0110-跨平台全平台-man-替代)
+- [x] `woman init` 交互式初始化向导：models.dev 目录缓存离线可用（212 厂商/172 OpenAI 兼容/7478 模型解析通过）、选厂商/模型/掩码输 Key、可重复进向导增改提供者、`--refresh/--reset/--wipe` — [Taolun → 2026-09-01 woman init](#2026-09-01--woman-init交互式初始化-向导--modelsdev-目录) | [Changelog → v0.10.0](#20260901--v0100-woman-init交互式初始化-向导--modelsdev-目录)
+- [x] 手册详细化 + 本地选项校对：skill 模板改详细完整手册（列全部选项）；`fetch_source` 双资料（本地 --help 真值 + 在线全文）；`enhance` AI 校对本机不支持选项并标注『本机此版本不支持』；无 AI 也抓在线全文缓存展示 — [Taolun → 2026-09-01 手册详细化](#2026-09-01--手册详细化--本地选项校对ai-校验) | [Changelog → v0.9.1](#20260901--v091-手册详细化--本地选项校对ai-校验)
+- [x] 重构为 man 替代品 + AI 可选智能渲染层：单命令 `woman <name>` 全自动取源；`-q` 问答；删 search/generate/-s；分类（coreutils/powershell/windows）+ Get-Help 源；skill 手册风格；mdr 卡片选择器；cache 改 .txt；docs type/ai-enhanced — [Taolun → 2026-09-01 重构](#2026-09-01--woman-重构为-man-替代品--ai-可选智能渲染层) | [Changelog → v0.9.0](#20260901--v090-重构为-man-替代品--ai-可选智能渲染层)
+- [x] 上下文压缩省 token：`run_bash` 截断降为 12000 + 新增 `trim_context()` 自动裁剪 — [Taolun → 2026-07-21 上下文压缩](#2026-07-21--上下文压缩省-token)
+- [x] 修复 `woman ai` 超长对话导致 curl.exe 无法启动（os error 206，请求体改落盘 `-d @file`） — [Taolun → 2026-07-21 curl body 落盘](#2026-07-21--curl-body-落盘修复-os-error-206)
 - [x] 创建 Rust 项目结构（Cargo.toml, src/） — [Taolun → 项目启动](#2026-07-11--项目启动)
 - [x] 实现 `~/.woman/` 目录初始化（docs/ + cache/ + config.json）
 - [x] 实现 `docs/` 读取与 YAML frontmatter 解析
@@ -229,6 +428,16 @@
 
 
 # 认知修正
+
+## 2026-07-21 — token 浪费的主因与取舍
+- **发现**：上下文最大浪费不是单次对话，而是「整段历史每轮全量重发」+「工具结果 5 万字符完整保留且永久留档」
+- **取舍**：粗暴丢历史会伤准确性；但工具输出瘦身 + 预算内优先保留工具链 + 最新提问兜底，可以在几乎不损失准确性的前提下大幅省 token
+- **教训**：工具输出的返回长度 == 后续每轮请求的复读成本（读 N 次）。输出用于提炼信息，AI 不需要 5 万字符原文，12000 足够。若未来确需大输出，应改为「摘要压缩」而非原文
+
+## 2026-07-21 — curl -d 与 Windows 命令行长度限制
+- **踩坑**：直接把 AI 请求 body 用 `-d <body>` 塞进命令行，对话历史累积后触发 os error 206（文件名或扩展名太长），curl.exe 无法启动
+- **纠正**：长 body 一律用 `-d @file`，把 JSON 写入系统临时目录由 curl 自行读取，命令行参数只保留短路径
+- **教训**：AGENTS.md v0.3.0 阶段就记录过「超长消息需改用 `-d @file`」，但后续实现一直没落地，直到生产环境真正撑爆。涉及 Windows `CreateProcess` 32767 字符限制时，写入文件是唯一可靠出路
 
 ## 2026-07-11 — Rust 依赖管理
 - **踩坑**：`ureq` 依赖 `rustls` → `ring`，在 `x86_64-pc-windows-gnu` 工具链下编译失败。`toml` crate 的 `toml_edit` 也有版本冲突
