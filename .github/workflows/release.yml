@@ -39,7 +39,10 @@ jobs:
         with:
           toolchain: stable
           cache: true
-          targets: ${{ matrix.cargo_target }}
+
+      - name: Install cross-compile target
+        if: ${{ matrix.cargo_target }}
+        run: rustup target add ${{ matrix.cargo_target }}
 
       - run: cargo build --release ${{ matrix.cargo_target && format('--target {0}', matrix.cargo_target) || '' }}
 
