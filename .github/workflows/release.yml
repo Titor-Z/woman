@@ -12,7 +12,21 @@ env:
 
 jobs:
   build:
-    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            suffix: x64-windows
+            binary: woman.exe
+          - os: macos-latest
+            suffix: aarch64-apple
+            binary: woman
+          - os: ubuntu-latest
+            suffix: x64-linux
+            binary: woman
+
+    runs-on: ${{ matrix.os }}
 
     steps:
       - uses: actions/checkout@v4
@@ -25,15 +39,15 @@ jobs:
       - run: cargo build --release
 
       - name: Rename binary with version
-        shell: pwsh
+        shell: bash
         run: |
-          $ver = "${{ github.ref_name }}"
-          Move-Item -Path target/release/woman.exe -Destination "woman-$ver-x64-windows.exe"
+          mv target/release/${{ matrix.binary }} \
+             woman-${{ github.ref_name }}-${{ matrix.suffix }}
 
       - uses: actions/upload-artifact@v4
         with:
-          name: woman-${{ github.ref_name }}-x64-windows.exe
-          path: woman-${{ github.ref_name }}-x64-windows.exe
+          name: woman-${{ github.ref_name }}-${{ matrix.suffix }}
+          path: woman-${{ github.ref_name }}-${{ matrix.suffix }}
           if-no-files-found: error
 
   release:
@@ -44,8 +58,10 @@ jobs:
       - uses: actions/checkout@v4
 
       - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
 
       - name: Create release
         uses: softprops/action-gh-release@v2
         with:
-          files: woman-*/woman-*
+          files: artifacts/**/*

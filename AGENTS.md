@@ -1,5 +1,13 @@
 # Changelog
 
+## [2026.09.01] — CI / Release 三平台构建
+- 项目已跨平台（v0.11.0），把两个 GitHub Actions workflow 从「仅 Windows」扩展为**三平台矩阵构建**（Windows / macOS / Linux）
+- `build.yml`：三平台矩阵 + 新增 `cargo test`（先在 debug 跑测试再 release 构建）+ 上传各平台产物
+- `release.yml`：三平台矩阵构建 + 统一命名 `woman-<tag>-<os>` 上传 Release（`softprops/action-gh-release`）
+- 产物命名：Windows `x64-windows` / macOS `aarch64-apple`（macos-latest 为 arm64）/ Linux `x64-linux`
+- 依赖（dirs/serde/ratatui/crossterm）纯 Rust 跨平台，无需额外 target 安装
+- **变更详情**：[Taolun → 2026-09-01 CI/Release](#2026-09-01--cirelease-三平台构建) | [项目进度 → 已完成](#已完成)
+
 ## [2026.09.01] — v0.11.0 跨平台：全平台 man 替代（Windows / macOS / Linux）
 - 从 Windows 专用改为**全平台 man 替代品**，mac/linux 也能用
 - 新增**统一平台抽象层 `src/platform.rs`**：把全部 `cfg!(target_os)` 分叉收敛到一处，其余模块调用它
@@ -146,6 +154,25 @@
 
 
 # Taolun
+
+## 2026-09-01 — CI / Release 三平台构建
+### 讨论摘要
+- 用户诉求：项目已从 Windows 专用改为**全平台 man 替代品**（v0.11.0），但现有 GitHub Actions 仍只构建 Windows，需要让 CI 跟上跨平台
+- 现状：`build.yml` 仅在 `windows-latest` 构建且不跑测试；`release.yml` 同样只在 Windows 构建一个产物
+- 改动：两个 workflow 均改为**三平台矩阵构建**（Windows / macOS / Linux）
+  - 依赖（dirs/serde/ratatui/crossterm）均为纯 Rust 跨平台，无需额外 target 安装
+  - 矩阵含 `os` / `suffix`（产物命名）/ `binary`（产物文件名差异：win 有 `.exe`）
+  - `build.yml` 增加 `cargo test`（先在 debug 跑测试再 release 构建），并上传产物
+  - `release.yml` 三平台构建 + 统一命名 `woman-<tag>-<os>` 上传 Release（softprops/action-gh-release）
+- 产物命名：Windows `x64-windows` / macOS `aarch64-apple`（macos-latest 为 arm64）/ Linux `x64-linux`
+
+### 涉及文件
+- `.github/workflows/build.yml` — 三平台矩阵 + `cargo test` + 上传产物
+- `.github/workflows/release.yml` — 三平台矩阵 + 统一命名 Release 产物
+- `AGENTS.md` — 记录
+
+### 相关变更
+- [Changelog → CI/Release 三平台构建](#20260901--cirelease-三平台构建) | [项目进度 → 已完成](#已完成)
 
 ## 2026-09-01 — 跨平台：全平台 man 替代（Windows / macOS / Linux）
 ### 讨论摘要
@@ -322,6 +349,7 @@
 - （无）
 
 ### 已完成
+- [x] CI / Release 三平台矩阵构建：`build.yml`（三平台 + `cargo test` + 上传产物）、`release.yml`（三平台 + 统一命名 `woman-<tag>-<os>` 上传 Release）— [Taolun → 2026-09-01 CI/Release](#2026-09-01--cirelease-三平台构建) | [Changelog → CI/Release 三平台构建](#20260901--cirelease-三平台构建)
 - [x] 跨平台全平台 man 替代（Windows/macOS/Linux）：新增 `src/platform.rs` 统一平台抽象层收敛全部 cfg! 分叉；AI shell 三平台可用（pwsh/sh）+ `is_dangerous` 分平台黑名单；`system_prompt`/`tools_json` 分平台实体；coreutils 分类（Win 探 coreutils.exe / Unix 用系统二进制）；man/whatis Unix 源；Get-Help 编译期 cfg 排除；skill 模板通用化 — [Taolun → 2026-09-01 跨平台](#2026-09-01--跨平台全平台-man-替代) | [Changelog → v0.11.0](#20260901--v0110-跨平台全平台-man-替代)
 - [x] `woman init` 交互式初始化向导：models.dev 目录缓存离线可用（212 厂商/172 OpenAI 兼容/7478 模型解析通过）、选厂商/模型/掩码输 Key、可重复进向导增改提供者、`--refresh/--reset/--wipe` — [Taolun → 2026-09-01 woman init](#2026-09-01--woman-init交互式初始化-向导--modelsdev-目录) | [Changelog → v0.10.0](#20260901--v0100-woman-init交互式初始化-向导--modelsdev-目录)
 - [x] 手册详细化 + 本地选项校对：skill 模板改详细完整手册（列全部选项）；`fetch_source` 双资料（本地 --help 真值 + 在线全文）；`enhance` AI 校对本机不支持选项并标注『本机此版本不支持』；无 AI 也抓在线全文缓存展示 — [Taolun → 2026-09-01 手册详细化](#2026-09-01--手册详细化--本地选项校对ai-校验) | [Changelog → v0.9.1](#20260901--v091-手册详细化--本地选项校对ai-校验)
