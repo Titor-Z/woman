@@ -22,9 +22,10 @@ jobs:
           - os: macos-latest
             suffix: aarch64-apple
             binary: woman
-          - os: macos-13
+          - os: macos-latest
             suffix: x64-apple
             binary: woman
+            cargo_target: x86_64-apple-darwin
           - os: ubuntu-latest
             suffix: x64-linux
             binary: woman
@@ -38,13 +39,15 @@ jobs:
         with:
           toolchain: stable
           cache: true
+          targets: ${{ matrix.cargo_target }}
 
-      - run: cargo build --release
+      - run: cargo build --release ${{ matrix.cargo_target && format('--target {0}', matrix.cargo_target) || '' }}
 
       - name: Rename binary with version
         shell: bash
         run: |
-          mv target/release/${{ matrix.binary }} \
+          src="${{ matrix.cargo_target && format('target/{0}/release/{1}', matrix.cargo_target, matrix.binary) || format('target/release/{0}', matrix.binary) }}"
+          mv "$src" \
              woman-${{ github.ref_name }}-${{ matrix.suffix }}
 
       - uses: actions/upload-artifact@v4
