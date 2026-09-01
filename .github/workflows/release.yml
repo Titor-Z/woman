@@ -22,6 +22,9 @@ jobs:
           - os: macos-latest
             suffix: aarch64-apple
             binary: woman
+          - os: macos-13
+            suffix: x64-apple
+            binary: woman
           - os: ubuntu-latest
             suffix: x64-linux
             binary: woman
