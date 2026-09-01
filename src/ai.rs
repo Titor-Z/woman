@@ -6,7 +6,7 @@ use crate::config::{AiProvider, Config};
 use crate::docs::current_date;
 use crate::platform;
 
-use crossterm::cursor::{Hide, MoveUp, Show};
+use crossterm::cursor::{Hide, MoveTo, Show};
 use crossterm::event::{read, Event, KeyCode, KeyEventKind};
 use crossterm::execute;
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
@@ -756,16 +756,14 @@ fn truncate_output(text: &str) -> String {
 
 fn print_repl_help() {
     println!("╌╌╌ WOMAN AI 命令 ╌╌╌");
-    println!("  [\x1b[34m/exit\x1b[0m] / [\x1b[34m/quit\x1b[0m]    退出对话");
+    println!("  [\x1b[34m/exit\x1b[0m]             退出对话");
     println!("  [\x1b[34m/help\x1b[0m]           显示此帮助");
     println!("  [\x1b[34m/clear\x1b[0m]          清屏");
     println!("  [\x1b[34m/truncate\x1b[0m]       清除历史，开始新话题");
     println!("  [\x1b[34m/model\x1b[0m]           列出可用模型");
     println!("  [\x1b[34m/model\x1b[0m] <name>    切换到指定模型");
+    println!("  [\x1b[34mCtrl+D\x1b[0m]         空输入时退出对话");
     println!("╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌");
-    println!("其余文字作为消息发送给 AI。");
-    println!("AI 只有一个 bash 工具，可执行任何 PowerShell 命令。");
-    println!("例如：`ls.exe` `cat.exe` `curl.exe` `where.exe` 等。");
 }
 
 fn clear_screen() {
@@ -782,48 +780,75 @@ fn clear_screen() {
     }
 }
 
-/// 交互式选择器：↑↓/jk 切换，Enter 确认，Esc 取消
+/// 交互式选择器：↑↓/jk 切换，Enter 确认，Esc 取消。
+///
+/// 重绘策略：
+/// - 进入前记录列表首行的绝对行号，每次重绘用 `MoveTo` 直接定位（不再用
+///   `MoveUp` 累积移动，避免任何滚动/光标偏差导致的错位残影）；
+/// - 仅在选中项真正变化时才重绘列表（无关按键、鼠标事件不触发重绘）；
+/// - 每行行尾写 `\x1b[K` 清到行尾，长名称行缩短后不留残影；
+/// - 结束后光标移到列表下方另起一行，列表保留在屏幕上作为选择记录。
 fn select_provider(all: &[AiProvider], current: &str) -> Option<usize> {
     if all.len() <= 1 {
         return None;
     }
     let mut sel = all.iter().position(|p| p.name == current).unwrap_or(0);
-    execute!(io::stdout(), Hide).ok()?;
-    enable_raw_mode().ok()?;
 
-    for (i, p) in all.iter().enumerate() {
-        if i == sel {
-            println!("\x1b[48;5;208m\x1b[30m {} · {} \x1b[0m", p.name, p.model);
-        } else {
-            println!("  {} · {}", p.name, p.model);
+    // 记录列表起始行（进入 raw 模式前光标所在行）
+    let start_row = crossterm::cursor::position()
+        .ok()
+        .map(|p| p.1)
+        .unwrap_or(0);
+
+    enable_raw_mode().ok()?;
+    execute!(io::stdout(), Hide).ok()?;
+
+    /// 绘制一帧列表：MoveTo 逐行定位 + 行尾清行，绝对定位不累积偏差
+    fn draw_list(all: &[AiProvider], sel: usize, start_row: u16) {
+        let mut out = io::stdout();
+        for (i, p) in all.iter().enumerate() {
+            let _ = execute!(out, MoveTo(0, start_row + i as u16));
+            if i == sel {
+                let _ = write!(
+                    out,
+                    "\x1b[48;5;208m\x1b[30m {} · {} \x1b[0m\x1b[K",
+                    p.name, p.model
+                );
+            } else {
+                let _ = write!(out, "  {} · {}\x1b[K", p.name, p.model);
+            }
         }
+        let _ = out.flush();
     }
+
+    draw_list(all, sel, start_row);
 
     let result = loop {
         match read() {
             Ok(Event::Key(ke)) if ke.kind == KeyEventKind::Press => match ke.code {
-                KeyCode::Up | KeyCode::Char('k') if sel > 0 => sel -= 1,
-                KeyCode::Down | KeyCode::Char('j') if sel + 1 < all.len() => sel += 1,
+                KeyCode::Up | KeyCode::Char('k') if sel > 0 => {
+                    sel -= 1;
+                    draw_list(all, sel, start_row);
+                }
+                KeyCode::Down | KeyCode::Char('j') if sel + 1 < all.len() => {
+                    sel += 1;
+                    draw_list(all, sel, start_row);
+                }
                 KeyCode::Enter => break Some(sel),
                 KeyCode::Esc => break None,
                 _ => {}
             },
-            _ => {}
-        }
-        for _ in 0..all.len() {
-            execute!(io::stdout(), MoveUp(1)).ok();
-        }
-        for (i, p) in all.iter().enumerate() {
-            if i == sel {
-                println!("\x1b[48;5;208m\x1b[30m {} · {} \x1b[0m", p.name, p.model);
-            } else {
-                println!("  {} · {}", p.name, p.model);
-            }
+            Ok(_) => {} // 鼠标 / Resize 等事件不触发重绘
+            Err(_) => break None,
         }
     };
 
+    // 结束：光标移到列表下方另起一行，后续输出从列表之下开始，不与列表重叠
+    let mut out = io::stdout();
+    let _ = execute!(out, MoveTo(0, start_row + all.len() as u16));
+    let _ = writeln!(out);
     disable_raw_mode().ok()?;
-    execute!(io::stdout(), Show).ok();
+    execute!(out, Show).ok();
     result
 }
 
@@ -921,7 +946,7 @@ pub fn run_repl(initial: AiProvider, all_providers: &mut Vec<AiProvider>) -> Res
     });
 
     println!("\n🤖 WOMAN AI · \x1b[38;5;208m{}\x1b[0m", current.name);
-    println!("💡 输入 [\x1b[34m/exit\x1b[0m] 退出 · [\x1b[34m/help\x1b[0m] 查看帮助\n");
+    println!("💡 输入 [\x1b[34m/exit\x1b[0m] 退出（或空输入 Ctrl+D） · [\x1b[34m/help\x1b[0m] 查看帮助\n");
 
     loop {
         // 进入多行编辑器读取输入（raw 模式，支持斜杠候选抽屉、Ctrl+J 换行）
@@ -942,7 +967,7 @@ pub fn run_repl(initial: AiProvider, all_providers: &mut Vec<AiProvider>) -> Res
         if is_slash_cmd {
             let parts: Vec<&str> = line.split_whitespace().collect();
             match parts[0] {
-                "/exit" | "/quit" => {
+                "/exit" => {
                     println!("再见！");
                     break;
                 }

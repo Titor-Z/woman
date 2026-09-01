@@ -1,5 +1,16 @@
 # Changelog
 
+## [2026.09.01] — 输入框选择性重绘省刷新（优化 AI 抽屉闪烁）
+- `woman ai` 输入框：输入 `/`、`/xxx` 时抽屉不再被每个按键整块重绘闪不停，只在**候选真正变化**时才刷新
+- 根因：`render()` 每次按键都 `Clear(FromCursorDown)` 清空输入区 + 抽屉再整体重绘
+- 新增**选择性重绘**：`Editor` 记录上一帧快照（`last_drawer`/`last_in_lines`/`last_buf`/`last_cursor`）
+  - 抽屉状态（候选/选中/开关/输入高度）变化 → 完整重绘输入 + 抽屉
+  - 仅输入文字变化、抽屉未变 → **只重绘输入行**（逐行 `MoveTo + Clear(CurrentLine)` 清残影，不触碰下方抽屉）
+  - 整帧完全一致（如按键 Repeat）→ **跳过一切终端输出**
+- 实测效果：输 `/help` 时 `/h`→`/he`→`/hel`→`/help` 一路候选锁定 `/help` 后，抽屉不再重绘，只有输入行刷新
+- 新增测试：`drawer_not_rewritten_when_unchanged`、`partial_redraw_updates_input_without_drawer`、`identical_frame_produces_no_output`；`Screen` 模拟器补 `\x1b[K`（Clear(CurrentLine)）支持；28 测试全过
+- **变更详情**：[Taolun → 2026-09-01 输入框选择性重绘](#2026-09-01--输入框选择性重绘) | [项目进度 → 已完成](#已完成)
+
 ## [2026.09.01] — CI / Release 三平台构建
 - 项目已跨平台（v0.11.0），把两个 GitHub Actions workflow 从「仅 Windows」扩展为**三平台矩阵构建**（Windows / macOS / Linux）
 - `build.yml`：三平台矩阵 + 新增 `cargo test`（先在 debug 跑测试再 release 构建）+ 上传各平台产物
@@ -44,6 +55,17 @@
 - cache 存合并后的完整原始资料（本地 + 在线），无 AI / AI 失败时兜底展示 `combined`
 - skill 测试新增「本地选项校对 + 完整性」断言
 - **变更详情**：[Taolun → 2026-09-01 手册详细化](#2026-09-01--手册详细化--本地选项校对ai-校验) | [项目进度 → 已完成](#已完成)
+
+## [2026.09.01] — v0.11.1 AI 模式 TUI 残影/重叠修复
+- 修复编辑器锚点在终端上滚后失效（核心根因）：输入/抽屉越过屏幕底部触发终端自动上滚时，内容整体上移而 anchor 绝对行号不变，后续重绘全部错位 → 残影/重叠。新增 `ensure_space()` 预滚动：估算本帧占用行数（输入 + 抽屉 + 边距），不足则在底行主动换行触发上滚并同步下调锚点
+- 修复不响应窗口 Resize：`term_width` 原先只取一次；现监听 `Event::Resize` 更新宽度、夹回锚点到屏内、作废快照强制下一帧完整重绘
+- 修复 `/model` 选择器多重绘制：原先任意按键（含无关键/鼠标事件）都整列表重绘，且用 `MoveUp(1)` 累积定位（滚动后错位）；改为进入前记录首行绝对行号 + `MoveTo` 逐行定位重绘、仅选中项变化时重绘、行尾 `\x1b[K` 清残影、结束后光标移到列表下方另起一行
+- 修复编辑时光标不可见：`read_input` 进入时 `Hide` 藏掉硬件光标且全程不再显示，而 `render` 依赖把硬件光标放到插入点供用户定位；移除 `Hide`，编辑期间光标保持可见
+- 新增 Ctrl+D 退出：空输入时退出会话（read_input 返回 `None`，REPL 打印再见）；非空时按 readline 惯例向前删除一个字符；/help 与启动提示同步更新
+- 修复提交后排版：编辑器提交后的最终渲染把光标留在输入行末尾且不换行，后续输出（/help、AI 回答）拼接在同一行；现提交收尾时清空输入区下方（含残留抽屉）并从输入行末尾 `\r\n` 换行
+- 精简 `/help`：删去「其余文字作为消息发送给 AI」与 bash 工具/示例说明，只保留命令清单（工具能力说明属于 system prompt 职责）
+- 移除重复命令 `/quit`：与 `/exit` 语义相同，抽屉候选、命令分发、/help 三处同步删除
+- **变更详情**：[Taolun → TUI 残影修复](#20260901--ai-模式-tui-残影重叠修复) | [项目进度 → 已完成](#已完成)
 
 ## [2026.09.01] — v0.9.0 重构为 man 替代品 + AI 可选智能渲染层
 - 单二进制 + 单命令对齐 man：`woman <name>` 即手册查询；新增 `woman -q "<问题>"` 一次性 agent 问答；保留 `woman ai`；**移除** `search`/`generate`/`-s`
@@ -155,6 +177,55 @@
 
 
 # Taolun
+
+## 2026-09-01 — AI 模式 TUI 残影/重叠修复
+### 讨论摘要
+- 用户反馈：AI 模式（`woman ai`）TUI 交互有 BUG，残影/重叠/多次绘制均存在
+- 排查定位三个根因：
+  1. **编辑器锚点上滚失效（最核心）**：`read_input` 进入时取一次绝对行号 anchor；输入行数或抽屉（6 候选 + 空行）越过屏幕底部触发终端自动上滚后，已画内容整体上移而 anchor 不变，后续重绘全错位 → 残影/重叠。此前的屏幕模拟器测试 clamp 了滚动但未校准 anchor，未能暴露
+  2. **不处理 Resize**：`term_width` 只取一次，窗口缩放后软换行布局全错，anchor 可能落在屏幕外
+  3. **`/model` 选择器**：循环里每收到任意事件就整列表重绘（无关按键/鼠标也重绘），且用 `MoveUp(1)` 累积定位（任何滚动即错位），结束后列表残留在屏幕无收尾
+- 修复方案：
+  - `editor.rs` 新增 `ensure_space()` 预滚动：按 render 写入量估算本帧行数（输入 `in_lines` + 抽屉 `m.len()+2` + 恒定 1 行边距吸收底行列溢出），空间不足则 `MoveTo` 底行写 `\r\n` 主动触发上滚并下调 anchor；`read_input` 每帧渲染前与提交后最终 render 前都调用
+  - 事件循环改匹配 `Event::Resize`：更新 `term_width`（min 20）、anchor 夹回 `rows-1` 内、`Editor::reset_snapshots()` 作废快照强制完整重绘；鼠标等其他事件忽略
+  - `ai.rs::select_provider` 重写：进入前 `cursor::position()` 记录首行，`draw_list()` 用 `MoveTo(0, start_row+i)` 绝对定位逐行重绘 + 行尾 `\x1b[K` 清行尾残影；仅 ↑↓/jk 真正改变 sel 时重绘；结束后 `MoveTo` 列表下方 `writeln!` 另起一行，列表保留为选择记录
+- 测试：28 个全过（新增逻辑由既有渲染回归测试覆盖，`reset_snapshots`/`ensure_space` 为运行时终端行为，模拟器不涉及）
+- 后续追加（同会话实测反馈）：
+  - 光标不可见：`read_input` 进入时 `Hide` 且全程不再显示，移除之
+  - Ctrl+D 退出：空输入退出（`None`），非空向前删除
+  - 提交后排版：最终渲染不换行导致后续输出拼接；收尾时清空输入区下方并 `\r\n` 换行
+  - `/help` 精简：只留命令清单
+  - 删除重复命令 `/quit`（与 `/exit` 同义）
+
+### 涉及文件
+- `src/editor.rs` — 新增 `ensure_space()` 预滚动 + `Editor::reset_snapshots()`；`read_input` 事件循环支持 Resize、anchor/term_width 可变
+- `src/ai.rs` — 重写 `select_provider()`（MoveTo 绝对定位 + 变化才重绘 + 行尾清行 + 干净收尾）；imports 去 `MoveUp` 加 `MoveTo`
+- `Cargo.toml` — 版本 0.11.0 → 0.11.1
+- `AGENTS.md` — 记录
+
+### 相关变更
+- [Changelog → v0.11.1](#20260901--v0111-ai-模式-tui-残影重叠修复) | [项目进度 → 已完成](#已完成)
+
+## 2026-09-01 — 输入框选择性重绘
+### 讨论摘要
+- 用户反馈：`woman ai` 输入 `/` 或 `/xxx` 时，下拉框会被自动重绘好几次、反复闪烁
+- 根因：`render()` 每次按键都 `MoveTo(0,anchor) + Clear(FromCursorDown)` 把输入区**和抽屉**一起清空再整体重绘；输入 `/help` 时 `/h`→`/he`→`/hel`→`/help` 候选始终锁定 `/help`，却每次按键都整块刷新抽屉
+- 用户确认方案 = **选择性重绘抽屉**：抽屉只在其「视觉状态」变化时重绘
+- 实现：`Editor` 记录上一帧快照（`last_drawer`＝候选+选中、`last_in_lines`＝输入显示行数、`last_buf`、`last_cursor`）
+  - 抽屉状态（候选/选中/开关/输入高度）变化 → 完整重绘输入 + 抽屉（原逻辑）
+  - 仅输入文字变、抽屉未变 → **只重绘输入行**：逐行 `MoveTo + Clear(CurrentLine)`（`\x1b[K`）清残影，**不触碰下方抽屉**
+    - 不能再用 `Clear(FromCursorDown)`（会把抽屉一起清掉），改为按输入行数逐行清
+    - 输入显示行数变化（软换行/多行增减）会把抽屉位置顶下去 → 归入「抽屉变」走完整重绘
+  - 整帧完全一致（按键 Repeat）→ `frame_unchanged()` 命中，**跳过一切终端输出**（`/` 长按时不再空刷）
+- 单候选抽屉全量重绘的标志 = 选中行橙底 `\x1b[48;5;208m` / 未选行 `│`；抽屉未变的部分重绘不含这些，测试据此断言
+- 测试：新增 3 例（抽屉不变不重绘 / 只重绘输入行 / 整帧一致零输出）；`Screen` 模拟器补 `\x1b[K`（Clear(CurrentLine)）支持（此前可处理 `J`/`H`，缺 `K`）；28 测试全过
+
+### 涉及文件
+- `src/editor.rs` — `Editor` 加快照字段；新增 `frame_unchanged()`/`drawer_changed()`/`record_frame()`；`render()` 拆「完整/部分/跳过」三路径；`Screen` 模拟器加 `K`；新增 3 测试
+- `AGENTS.md` — 记录
+
+### 相关变更
+- [Changelog → 输入框选择性重绘](#20260901--输入框选择性重绘省刷新优化-ai-抽屉闪烁) | [项目进度 → 已完成](#已完成)
 
 ## 2026-09-01 — CI / Release 三平台构建
 ### 讨论摘要
@@ -351,6 +422,8 @@
 - （无）
 
 ### 已完成
+- [x] AI 模式 TUI 残影/重叠修复 + 交互打磨：编辑器 `ensure_space()` 预滚动校准上滚后的锚点（根因：输入/抽屉触底上滚使绝对行号 anchor 失效）；监听 Resize 更新宽度/夹回锚点/作废快照；`/model` 选择器改 MoveTo 绝对定位 + 仅选中变化才重绘 + 行尾 `\x1b[K` + 结束干净收尾；光标保持可见；Ctrl+D 退出；提交后排版收尾（清下方+换行）；`/help` 精简；删 `/quit` — [Taolun → TUI 残影修复](#20260901--ai-模式-tui-残影重叠修复) | [Changelog → v0.11.1](#20260901--v0111-ai-模式-tui-残影重叠修复)
+- [x] 输入框选择性重绘省刷新：`Editor` 记录上一帧快照（候选+选中+输入高度+缓冲+光标）；抽屉状态变→完整重绘，仅输入变→只重绘输入行（逐行 `\x1b[K` 清残影、不碰抽屉），整帧一致（Repeat）→零输出；`Screen` 模拟器补 `\x1b[K` 支持；28 测试全过 — [Taolun → 2026-09-01 输入框选择性重绘](#2026-09-01--输入框选择性重绘) | [Changelog → 输入框选择性重绘](#20260901--输入框选择性重绘省刷新优化-ai-抽屉闪烁)
 - [x] CI / Release 三平台矩阵构建：`build.yml`（三平台 + `cargo test` + 上传产物）、`release.yml`（三平台 + 统一命名 `woman-<tag>-<os>` 上传 Release）；补充 x64 mac 交叉编译（macos-latest 上 `--target x86_64-apple-darwin`，避免 macos-13 排队）成四平台（Windows x64 / macOS arm64+x64 / Linux x64）— [Taolun → 2026-09-01 CI/Release](#2026-09-01--cirelease-三平台构建) | [Changelog → CI/Release 三平台构建](#20260901--cirelease-三平台构建)
 - [x] 跨平台全平台 man 替代（Windows/macOS/Linux）：新增 `src/platform.rs` 统一平台抽象层收敛全部 cfg! 分叉；AI shell 三平台可用（pwsh/sh）+ `is_dangerous` 分平台黑名单；`system_prompt`/`tools_json` 分平台实体；coreutils 分类（Win 探 coreutils.exe / Unix 用系统二进制）；man/whatis Unix 源；Get-Help 编译期 cfg 排除；skill 模板通用化 — [Taolun → 2026-09-01 跨平台](#2026-09-01--跨平台全平台-man-替代) | [Changelog → v0.11.0](#20260901--v0110-跨平台全平台-man-替代)
 - [x] `woman init` 交互式初始化向导：models.dev 目录缓存离线可用（212 厂商/172 OpenAI 兼容/7478 模型解析通过）、选厂商/模型/掩码输 Key、可重复进向导增改提供者、`--refresh/--reset/--wipe` — [Taolun → 2026-09-01 woman init](#2026-09-01--woman-init交互式初始化-向导--modelsdev-目录) | [Changelog → v0.10.0](#20260901--v0100-woman-init交互式初始化-向导--modelsdev-目录)
