@@ -26,10 +26,21 @@ use crossterm::{
 // ============================================================
 
 /// 内置命令候选（抽屉内容）。顺序即显示顺序。
-pub const COMMANDS: &[&str] = &["/help", "/model", "/clear", "/truncate", "/exit"];
+pub const COMMANDS: &[&str] = &["/help", "/model", "/clear", "/truncate", "/exit", "/yolo"];
 
 const PROMPT: &str = "\x1b[34m> \x1b[0m";
-const PROMPT_WIDTH: usize = 2; // "> " 的字符宽度
+/// YOLO 模式提示符：黄色 ! + 空格（与 "> " 等宽，避免 emoji 宽度歧义导致不对齐）
+const PROMPT_YOLO: &str = "\x1b[33m!\x1b[0m ";
+const PROMPT_WIDTH: usize = 2; // "> " 与 "! " 的字符宽度（两者等宽）
+
+/// 按会话状态返回提示符字符串与显示宽度
+fn prompt_of(yolo: bool) -> (&'static str, usize) {
+    if yolo {
+        (PROMPT_YOLO, PROMPT_WIDTH)
+    } else {
+        (PROMPT, PROMPT_WIDTH)
+    }
+}
 
 const DRAWER_BG: &str = "\x1b[48;5;208m\x1b[30m"; // 选中项：橙底黑字
 const RESET: &str = "\x1b[0m";
@@ -62,9 +73,9 @@ fn char_width(c: char) -> usize {
 
 /// 把缓冲区布局为若干「显示行」，返回每行「在缓冲区中的起始字节」。
 /// 第 0 行起点多出 prompt 宽度；超宽自动软换行。
-fn layout_starts(buf: &str, term_width: usize) -> Vec<usize> {
+fn layout_starts(buf: &str, term_width: usize, pw: usize) -> Vec<usize> {
     let mut starts: Vec<usize> = Vec::new();
-    let mut col = PROMPT_WIDTH;
+    let mut col = pw;
     let mut line_start = 0usize;
     let mut i = 0usize;
     while i < buf.len() {
@@ -91,16 +102,16 @@ fn layout_starts(buf: &str, term_width: usize) -> Vec<usize> {
 }
 
 /// 光标处的 (显示行索引, 显示列) —— 由 buf[..cursor] 的布局得出
-fn cursor_pos(buf: &str, cursor: usize, term_width: usize) -> (usize, usize) {
+fn cursor_pos(buf: &str, cursor: usize, term_width: usize, pw: usize) -> (usize, usize) {
     let prefix = &buf[..cursor];
-    let starts = layout_starts(prefix, term_width);
+    let starts = layout_starts(prefix, term_width, pw);
     let row = starts.len().saturating_sub(1);
     let line_start = *starts.last().unwrap_or(&0);
     let seg = &prefix[line_start..];
     let seg_width = seg.chars().map(char_width).sum::<usize>();
     // 仅「最初那一行的首个显示行」在行首有 prompt 前缀；其余（软换行/后续逻辑行）从列 0 起
     let col = if line_start == 0 {
-        PROMPT_WIDTH + seg_width
+        pw + seg_width
     } else {
         seg_width
     };
@@ -369,11 +380,13 @@ fn render<W: Write>(
     ed: &mut Editor,
     anchor_row: usize,
     term_width: usize,
+    yolo: bool,
     out: &mut W,
     place_cursor: bool,
 ) -> io::Result<()> {
+    let (prompt, pw) = prompt_of(yolo);
     let m = ed.matches();
-    let in_lines = layout_starts(&ed.buf, term_width).len();
+    let in_lines = layout_starts(&ed.buf, term_width, pw).len();
 
     // 整帧与上次完全一致（如按键 Repeat）：无需向终端写任何字节
     if ed.frame_unchanged(in_lines, &m) {
@@ -394,7 +407,7 @@ fn render<W: Write>(
 
         // 打印 prompt + 缓冲区（内部换行由终端处理，超宽自动软换行）
         // 注意：raw 模式下 \n 不会自动回行首，需显式转为 \r\n
-        write!(out, "{}", PROMPT)?;
+        write!(out, "{}", prompt)?;
         let rendered_buf = ed.buf.replace('\n', "\r\n");
         write!(out, "{}", rendered_buf)?;
 
@@ -429,7 +442,7 @@ fn render<W: Write>(
 
     // 把硬件光标移回插入位置（仅在编辑过程中需要）
     if place_cursor {
-        let (cur_row, cur_col) = cursor_pos(&ed.buf, ed.cursor, term_width);
+        let (cur_row, cur_col) = cursor_pos(&ed.buf, ed.cursor, term_width, pw);
         execute!(out, MoveTo(cur_col as u16, (anchor_row + cur_row) as u16))?;
     }
 
@@ -455,6 +468,7 @@ fn ensure_space<W: Write>(
     ed: &Editor,
     anchor: usize,
     term_width: usize,
+    yolo: bool,
 ) -> usize {
     let rows = size()
         .ok()
@@ -462,7 +476,7 @@ fn ensure_space<W: Write>(
         .unwrap_or(24)
         .max(3);
     let m = ed.matches();
-    let in_lines = layout_starts(&ed.buf, term_width).len();
+    let in_lines = layout_starts(&ed.buf, term_width, prompt_of(yolo).1).len();
     let drawer_extra = if ed.menu_should_open() { m.len() + 2 } else { 0 };
     let needed = in_lines + drawer_extra + 1;
 
@@ -487,7 +501,7 @@ fn ensure_space<W: Write>(
 /// 在 raw 模式下读取一段多行输入。
 /// 返回 `Some(去首尾空白的字符串)`；
 /// 空缓冲时按 Ctrl+D 返回 `None`（退出会话）；无法进入 raw 模式也返回 `None`。
-pub fn read_input() -> Option<String> {
+pub fn read_input(yolo: bool) -> Option<String> {
     // 先记录进入编辑前硬件光标所在行（作为重绘锚点），再进入 raw 模式
     let mut anchor = crossterm::cursor::position()
         .ok()
@@ -514,9 +528,9 @@ pub fn read_input() -> Option<String> {
         // 先在底行主动写入换行触发终端上滚，并同步下调锚点。
         // 否则终端自动上滚会把已画内容整体上移，而 anchor 的绝对行号失效，
         // 后续重绘全部错位 → 残影 / 重叠。
-        anchor = ensure_space(&mut out, &ed, anchor, term_width);
+        anchor = ensure_space(&mut out, &ed, anchor, term_width, yolo);
 
-        render(&mut ed, anchor, term_width, &mut out, true).ok()?;
+        render(&mut ed, anchor, term_width, yolo, &mut out, true).ok()?;
 
         let ev = match event::read() {
             Ok(e) => e,
@@ -623,13 +637,14 @@ pub fn read_input() -> Option<String> {
 
     // 清理编辑区残影（不把光标移回插入点，让后续输出从输入末尾另起一行），恢复终端
     // 提交按键可能改变了缓冲（如 Tab 补全），先再做一次预滚动校准锚点
-    anchor = ensure_space(&mut out, &ed, anchor, term_width);
-    render(&mut ed, anchor, term_width, &mut out, false).ok()?;
+    anchor = ensure_space(&mut out, &ed, anchor, term_width, yolo);
+    render(&mut ed, anchor, term_width, yolo, &mut out, false).ok()?;
 
     // 提交收尾：清空输入区下方（残留的抽屉等），再从输入行末尾换行，
     // 让后续输出（帮助文本/AI 回答）从输入的下一行开始，不与输入拼接
     {
-        let (end_row, end_col) = cursor_pos(&ed.buf, ed.buf.len(), term_width);
+        let pw = prompt_of(yolo).1;
+        let (end_row, end_col) = cursor_pos(&ed.buf, ed.buf.len(), term_width, pw);
         let _ = execute!(
             out,
             MoveTo(0, (anchor + end_row + 1) as u16),
@@ -657,19 +672,19 @@ mod tests {
     #[test]
     fn layout_empty() {
         // 空缓冲区 → 只有一行，起点为字节 0
-        assert_eq!(layout_starts("", 80), vec![0]);
+        assert_eq!(layout_starts("", 80, PROMPT_WIDTH), vec![0]);
     }
 
     #[test]
     fn layout_single_short_line() {
         // 短单行不换行：始终一个显示行
-        assert_eq!(layout_starts("abc", 80), vec![0]);
+        assert_eq!(layout_starts("abc", 80, PROMPT_WIDTH), vec![0]);
     }
 
     #[test]
     fn layout_newline_splits() {
         // 换行拆成两个逻辑行：第一行起点 0，第二行起点 4
-        assert_eq!(layout_starts("abc\ndef", 80), vec![0, 4]);
+        assert_eq!(layout_starts("abc\ndef", 80, PROMPT_WIDTH), vec![0, 4]);
     }
 
     #[test]
@@ -678,32 +693,32 @@ mod tests {
         // “abc” col=5 满；再加 'd' 溢出 → 软换行，第二行起点字节 3
         let buf = "abcd";
         // 'a'(3) 'b'(4) 'c'(5) 'd'(6>5→换行) → starts=[0,3]
-        assert_eq!(layout_starts(buf, 5), vec![0, 3]);
+        assert_eq!(layout_starts(buf, 5, PROMPT_WIDTH), vec![0, 3]);
     }
 
     #[test]
     fn cursor_after_prompt_when_empty() {
         // 空输入：光标应在第一行、prompt 之后（列 2）
-        assert_eq!(cursor_pos("", 0, 80), (0, PROMPT_WIDTH));
+        assert_eq!(cursor_pos("", 0, 80, PROMPT_WIDTH), (0, PROMPT_WIDTH));
     }
 
     #[test]
     fn cursor_after_short_line() {
         // 'ab' 不换行：光标在同一行、prompt 之后
-        assert_eq!(cursor_pos("ab", 2, 80), (0, 2 + 2));
+        assert_eq!(cursor_pos("ab", 2, 80, PROMPT_WIDTH), (0, 2 + 2));
     }
 
     #[test]
     fn cursor_after_newline() {
         // 'abc\nde'：第二行没有 prompt 前缀，光标在第二行列 2（de 两个字符）
-        assert_eq!(cursor_pos("abc\nde", 6, 80), (1, 2));
+        assert_eq!(cursor_pos("abc\nde", 6, 80, PROMPT_WIDTH), (1, 2));
     }
 
     #[test]
     fn cursor_after_soft_wrap() {
         // term_width=5，'abcd' 第一行 'abc'(col5)，第二行 'd'
         // 光标在第二行：列应为 1（d 占 1，无反白 prompt）
-        assert_eq!(cursor_pos("abcd", 4, 5), (1, 1));
+        assert_eq!(cursor_pos("abcd", 4, 5, PROMPT_WIDTH), (1, 1));
     }
 
     #[test]
@@ -888,7 +903,7 @@ mod tests {
     /// 把某一步的 render 输出喂进屏幕模型，并断言某行不包含异常拼接片段
     fn consume_render(scr: &mut Screen, ed: &mut Editor, anchor: usize, width: usize) {
         let mut sink = Vec::new();
-        render(ed, anchor, width, &mut sink, true).unwrap();
+        render(ed, anchor, width, false, &mut sink, true).unwrap();
         scr.write(&String::from_utf8_lossy(&sink));
     }
 
@@ -1097,7 +1112,7 @@ mod tests {
     /// 渲染一帧并返回原始字节串（用于断言某帧是否重写了抽屉）。
     fn render_bytes(ed: &mut Editor, anchor: usize, width: usize) -> String {
         let mut sink = Vec::new();
-        render(ed, anchor, width, &mut sink, true).unwrap();
+        render(ed, anchor, width, false, &mut sink, true).unwrap();
         String::from_utf8_lossy(&sink).to_string()
     }
 

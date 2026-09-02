@@ -33,6 +33,7 @@ fn print_help() {
     println!("  woman <name>            查看命令手册（对齐 man：全自动取源 + AI 整理）");
     println!("  woman -q \"<问题>\"        一次性问答（AI 结合本地手册回答）");
     println!("  woman ai                交互式 AI 自由对话（/model 切换提供者）");
+    println!("  woman ai --yolo         同上，但 AI 执行命令免确认（谨慎使用）");
     println!("  woman init              交互式初始化向导（选厂商/模型，配置 AI）");
     println!("  woman init --refresh    重新拉取 models.dev 目录更新缓存");
     println!("  woman init --reset      恢复默认 config + skill 模板");
@@ -219,13 +220,13 @@ fn lookup_and_show(name: &str) {
 // 一次性问答（woman -q）
 // ============================================================
 
-fn run_query(question: &str) {
+fn run_query(question: &str, yolo: bool) {
     if !ai_available() {
         render_error("未配置有效的 AI 提供者，`woman -q` 需要 AI 能力。");
         render_hint("请编辑 ~/.woman/config.json 设置 api_key 后再试。");
         process::exit(1);
     }
-    match ask_once(question) {
+    match ask_once(question, yolo) {
         Ok(_) => {}
         Err(e) => {
             render_error(&e);
@@ -263,23 +264,30 @@ fn main() {
 
     let first = raw[1].as_str();
 
-    // -q：一次性问答
+    // -q：一次性问答（--yolo 可出现在任意位置，不作为问题内容）
     if first == "-q" || first == "--query" {
-        let question = raw[2..].join(" ");
+        let yolo = raw[2..].iter().any(|a| a == "--yolo");
+        let question = raw[2..]
+            .iter()
+            .filter(|a| a.as_str() != "--yolo")
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(" ");
         if question.trim().is_empty() {
             render_error("用法：woman -q \"<问题>\"");
             process::exit(1);
         }
-        run_query(&question);
+        run_query(&question, yolo);
         return;
     }
 
-    // ai：自由对话
+    // ai：自由对话（--yolo 跳过命令确认）
     if first == "ai" {
+        let yolo = raw[2..].iter().any(|a| a == "--yolo");
         let mut config = Config::load();
         match config.get_provider(None) {
             Some(p) => {
-                if let Err(e) = run_repl(p.clone(), &mut config.ai) {
+                if let Err(e) = run_repl(p.clone(), &mut config.ai, yolo) {
                     render_error(&e);
                     process::exit(1);
                 }

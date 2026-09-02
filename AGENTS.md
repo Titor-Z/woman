@@ -1,5 +1,13 @@
 # Changelog
 
+## [2026.09.01] — v0.12.0 bash 命令确认机制 + YOLO 免确认模式
+- 新增 **bash 命令确认机制**：`agent_tool_loop` 执行 AI 生成的命令前拦截确认——落盘三键 `y`（仅本条）/ `n`（拒绝，拒绝信息回填给 AI）/ `a`（本会话全部允许，`AtomicBool` 跨轮次生效）；raw 模式单键读取免回车
+- 新增 `--yolo` 免确认模式：`woman ai --yolo`、`woman -q ... --yolo`（`-q` 时 `--yolo` 可出现在任意位置，不并入问题文本）；启动横幅提示 YOLO 状态；`is_dangerous` 危险命令黑名单在 yolo 下仍生效（免确认 ≠ 免拦截）
+- 新增 `/yolo` REPL 命令：会话内随时切换免确认开关；抽屉候选与 /help 同步；初始值来自 `--yolo` 参数
+- 提示符随 YOLO 状态切换：`read_input(yolo)`；YOLO 时黄色 `! `、普通蓝色 `> `（两者等宽防不对齐；`PROMPT_YOLO` 用 `! ` 而非宽字符 emoji）；`layout_starts`/`cursor_pos`/`render`/`ensure_space`/测试全链路增加 prompt 宽度/yolo 参数
+- 抽取共用 agent 循环：`run_repl` 与 `ask_once` 的工具调用循环几乎逐行重复，抽出 `ai.rs::agent_tool_loop()` 供两者调用——成功时最终回答已追加进 messages 并返回文本，失败返回 Err 由调用方决定回滚（run_repl pop 掉本次提问）；`ask_once` 签名加 `yolo`
+- **变更详情**：[Taolun → v0.12.0 YOLO](#2026-09-01--bash-命令确认--yolo-免确认模式) | [项目进度 → 已完成](#已完成)
+
 ## [2026.09.01] — 输入框选择性重绘省刷新（优化 AI 抽屉闪烁）
 - `woman ai` 输入框：输入 `/`、`/xxx` 时抽屉不再被每个按键整块重绘闪不停，只在**候选真正变化**时才刷新
 - 根因：`render()` 每次按键都 `Clear(FromCursorDown)` 清空输入区 + 抽屉再整体重绘
@@ -177,6 +185,26 @@
 
 
 # Taolun
+
+## 2026-09-01 — v0.12.0：bash 命令确认 + YOLO 免确认模式
+### 讨论摘要
+- 用户想让 AI 执行 bash 前有**安全确认**，并提供可选的免确认纯畅跑模式
+- 方案（用户确认）：`agent_tool_loop` 执行命令前弹三键确认 `y仅本条 / n拒绝 / a本会话全部允许`；拒绝时把拒绝信息当工具结果回填给 AI，让它改用别的方式回答而不是反复尝试
+- `--yolo` 免确认：`woman ai --yolo`、`woman -q ... --yolo`；`-q` 时 `--yolo` 可在任意位置（在 raw[2..] 里过滤掉、不并入问题文本）；黑名单 `is_dangerous` 在 yolo 下仍生效（免确认 ≠ 免拦截）
+- `/yolo` REPL 命令会话内切换（mut 局部 yolo 变量，初始来自 `--yolo`）；COMMANDS/help 同步；启动横幅打 YOLO 状态
+- **提示符随状态切换但用 `! ` 而非 ⚡**：一开始想用黄色 ⚡，但宽字符（计宽 2）与非宽 `> ` 不等宽会致软换行/光标对不齐；改 `! `（宽度 2，与 `> ` 完全等宽），PROMPT_WIDTH 统一 2，`prompt_of(yolo)` 返回 (串,宽)，`layout_starts/cursor_pos/render/ensure_space/get_all` 全链路透传
+- 顺手把 `run_repl` 与 `ask_once` 几乎逐行重复的工具调用循环**抽出 `ai.rs::agent_tool_loop()`**：成功把最终回答追加进 messages 并返回文本；失败返回 Err，由 run_repl 侧 pop 掉本次提问回滚（-q 只跑一轮无所谓）
+- `run_repl` 里两次异步确认互斥：APPROVE_ALL 是 `static AtomicBool`，`a` 先 store 再执行；本会话内跨轮次生效，REPL 重启复位
+
+### 涉及文件
+- `src/ai.rs` — 新增 `agent_tool_loop()`/`confirm_command()`/`Confirm`；`APPROVE_ALL` 静态 AtomicBool；`ask_once(question, yolo)` 与 `run_repl(...)` 加 yolo；REPL `/yolo` 分支；/help 加一行
+- `src/editor.rs` — `COMMANDS` 加 `/yolo`；`PROMPT_YOLO`/`prompt_of()`；`read_input(yolo)` 及全链路 yolo/pw 透传
+- `src/main.rs` — `woman ai --yolo`/`woman -q ... --yolo` 解析；run_query/run_repl 传 yolo；主 help 加一行
+- `Cargo.toml` — 版本 0.11.1 → 0.12.0
+- `AGENTS.md` — 本条目 + changelog + 项目进度
+
+### 相关变更
+- [Changelog → v0.12.0](#20260901--v0120-bash-命令确认--yolo-免确认模式) | [项目进度 → 已完成](#已完成)
 
 ## 2026-09-01 — AI 模式 TUI 残影/重叠修复
 ### 讨论摘要
@@ -422,6 +450,7 @@
 - （无）
 
 ### 已完成
+- [x] v0.12.0 bash 命令确认 + YOLO 免确认模式：`agent_tool_loop` 执行命令前三键确认（y仅本条/n拒绝（回填 AI）/a本会话全部允许，AtomicBool 跨轮次）；`--yolo` 免确认（`ai --yolo`、`-q ... --yolo`）；`/yolo` REPL 会话内切换；提示符随状态切换（黄 `! `/蓝 `> `，等宽防不对齐）；抽出 `agent_tool_loop()` 供 run_repl/ask_once 共用；黑名单在 yolo 下仍生效；28 测试全过 — [Taolun → v0.12.0 YOLO](#2026-09-01--v0120-bash-命令确认--yolo-免确认模式) | [Changelog → v0.12.0](#20260901--v0120-bash-命令确认--yolo-免确认模式)
 - [x] AI 模式 TUI 残影/重叠修复 + 交互打磨：编辑器 `ensure_space()` 预滚动校准上滚后的锚点（根因：输入/抽屉触底上滚使绝对行号 anchor 失效）；监听 Resize 更新宽度/夹回锚点/作废快照；`/model` 选择器改 MoveTo 绝对定位 + 仅选中变化才重绘 + 行尾 `\x1b[K` + 结束干净收尾；光标保持可见；Ctrl+D 退出；提交后排版收尾（清下方+换行）；`/help` 精简；删 `/quit` — [Taolun → TUI 残影修复](#20260901--ai-模式-tui-残影重叠修复) | [Changelog → v0.11.1](#20260901--v0111-ai-模式-tui-残影重叠修复)
 - [x] 输入框选择性重绘省刷新：`Editor` 记录上一帧快照（候选+选中+输入高度+缓冲+光标）；抽屉状态变→完整重绘，仅输入变→只重绘输入行（逐行 `\x1b[K` 清残影、不碰抽屉），整帧一致（Repeat）→零输出；`Screen` 模拟器补 `\x1b[K` 支持；28 测试全过 — [Taolun → 2026-09-01 输入框选择性重绘](#2026-09-01--输入框选择性重绘) | [Changelog → 输入框选择性重绘](#20260901--输入框选择性重绘省刷新优化-ai-抽屉闪烁)
 - [x] CI / Release 三平台矩阵构建：`build.yml`（三平台 + `cargo test` + 上传产物）、`release.yml`（三平台 + 统一命名 `woman-<tag>-<os>` 上传 Release）；补充 x64 mac 交叉编译（macos-latest 上 `--target x86_64-apple-darwin`，避免 macos-13 排队）成四平台（Windows x64 / macOS arm64+x64 / Linux x64）— [Taolun → 2026-09-01 CI/Release](#2026-09-01--cirelease-三平台构建) | [Changelog → CI/Release 三平台构建](#20260901--cirelease-三平台构建)

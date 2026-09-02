@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::Duration;
 
@@ -660,7 +661,7 @@ pub fn enhance(
 /// 只回答一轮即结束。返回最终回答文本（流式打印由调用方处理）。
 ///
 /// 无 AI key 时返回错误（-q 本质依赖 AI）。
-pub fn ask_once(question: &str) -> Result<String, String> {
+pub fn ask_once(question: &str, yolo: bool) -> Result<String, String> {
     let config = Config::load();
     let provider = config.get_provider(None).ok_or_else(|| {
         "未配置 AI 提供者。请编辑 ~/.woman/config.json 添加 ai 配置。".to_string()
@@ -687,52 +688,8 @@ pub fn ask_once(question: &str) -> Result<String, String> {
         tool_calls: None,
     });
 
-    // 工具调用循环（与 run_repl 内核一致，但只跑一轮）
-    loop {
-        match chat_completion_stream(&provider, &trim_context(&messages)) {
-            Ok(StreamOutcome::ToolCall { fc, tool_call_id }) => {
-                let cmd = serde_json::from_str::<serde_json::Value>(&fc.arguments)
-                    .ok()
-                    .and_then(|v| v["command"].as_str().map(|s| s.to_string()))
-                    .unwrap_or_else(|| fc.arguments.trim_matches('"').to_string());
-
-                println!("\x1b[2m\x1b[38;5;244m$ {}\x1b[0m", cmd);
-                let result = run_bash(&cmd);
-                if !result.is_empty() {
-                    println!("\x1b[2m\x1b[38;5;244m{}\x1b[0m", truncate_output(&result));
-                }
-
-                let tcid = tool_call_id.unwrap_or_else(|| "call_0".to_string());
-                messages.push(RequestMessage {
-                    role: "assistant".into(),
-                    content: None,
-                    tool_call_id: None,
-                    name: None,
-                    tool_calls: Some(vec![serde_json::json!({
-                        "id": tcid,
-                        "type": "function",
-                        "function": { "name": fc.name, "arguments": fc.arguments }
-                    })]),
-                });
-                messages.push(RequestMessage {
-                    role: "tool".into(),
-                    content: Some(result),
-                    tool_call_id: Some(tcid),
-                    name: None,
-                    tool_calls: None,
-                });
-            }
-            Ok(StreamOutcome::Complete(content)) => {
-                let clean = content
-                    .replace("<|FunctionCallBegin|>", "")
-                    .replace("<|FunctionCallEnd|>", "")
-                    .trim()
-                    .to_string();
-                return Ok(clean);
-            }
-            Err(e) => return Err(e),
-        }
-    }
+    // 工具调用循环（与 run_repl 共用 agent_tool_loop，只跑一轮即结束）
+    agent_tool_loop(&provider, &mut messages, yolo)
 }
 
 // ============================================================
@@ -751,6 +708,136 @@ fn truncate_output(text: &str) -> String {
 }
 
 // ============================================================
+// Agent 工具调用循环（run_repl / ask_once 共用）
+// ============================================================
+
+/// 本会话是否已选择「全部允许」（确认提示中按 a），跨轮次生效。
+/// --yolo 模式不经过此标志（直接跳过确认）。
+static APPROVE_ALL: AtomicBool = AtomicBool::new(false);
+
+/// 命令确认结果
+enum Confirm {
+    Yes, // 仅执行本条
+    All, // 本会话全部允许
+    No,  // 拒绝
+}
+
+/// 命令执行前确认：展示命令，单键选择 y/n/a（Esc/其他键规为拒绝）。
+/// raw 模式读单键，无需回车。
+fn confirm_command(cmd: &str) -> Confirm {
+    println!(
+        "\x1b[33m?\x1b[0m 允许执行：\x1b[36m{cmd}\x1b[0m \x1b[2m[y] 是 / [n] 否 / [a] 本会话全部允许\x1b[0m"
+    );
+    let _ = io::stdout().flush();
+    enable_raw_mode().ok();
+    let result = loop {
+        match read() {
+            Ok(Event::Key(ke)) if ke.kind == KeyEventKind::Press => match ke.code {
+                KeyCode::Char('y') | KeyCode::Char('Y') => break Confirm::Yes,
+                KeyCode::Char('a') | KeyCode::Char('A') => break Confirm::All,
+                _ => break Confirm::No,
+            },
+            Ok(_) => {}
+            Err(_) => break Confirm::No,
+        }
+    };
+    disable_raw_mode().ok();
+    result
+}
+
+/// 运行 agent 工具调用循环：流式请求 → 若模型返回工具调用则执行 bash 并
+/// 回填结果继续请求 → 直到模型给出最终回答。
+///
+/// - `yolo`：true 时跳过命令确认直接执行（--yolo 模式）
+/// - 成功：最终回答已作为 assistant 消息追加进 `messages`，并返回其文本
+/// - 失败：返回 `Err`，由调用方决定回滚（如 run_repl 会 pop 掉本次 user 消息）
+fn agent_tool_loop(
+    provider: &AiProvider,
+    messages: &mut Vec<RequestMessage>,
+    yolo: bool,
+) -> Result<String, String> {
+    loop {
+        // 每次请求前做上下文裁剪，控制 token 增长
+        match chat_completion_stream(provider, &trim_context(messages)) {
+            Ok(StreamOutcome::ToolCall { fc, tool_call_id }) => {
+                // 从 arguments 中提取 command 参数
+                let cmd = serde_json::from_str::<serde_json::Value>(&fc.arguments)
+                    .ok()
+                    .and_then(|v| v["command"].as_str().map(|s| s.to_string()))
+                    .unwrap_or_else(|| fc.arguments.trim_matches('"').to_string());
+
+                println!("\x1b[2m\x1b[38;5;244m$ {}\x1b[0m", cmd);
+
+                // 命令确认：yolo > 会话级全部允许 > 单次确认；
+                // 拒绝时不执行，把拒绝信息作为工具结果回给 AI，让它自行调整
+                let approved = yolo
+                    || APPROVE_ALL.load(Ordering::Relaxed)
+                    || match confirm_command(&cmd) {
+                        Confirm::Yes => true,
+                        Confirm::All => {
+                            APPROVE_ALL.store(true, Ordering::Relaxed);
+                            true
+                        }
+                        Confirm::No => false,
+                    };
+                let result = if approved {
+                    run_bash(&cmd)
+                } else {
+                    println!("\x1b[2m（已拒绝执行）\x1b[0m");
+                    "用户拒绝执行该命令。请不要重复尝试，改用其他方式回答。".to_string()
+                };
+                if !result.is_empty() {
+                    println!("\x1b[2m\x1b[38;5;244m{}\x1b[0m", truncate_output(&result));
+                }
+
+                let tcid = tool_call_id.unwrap_or_else(|| "call_0".to_string());
+                messages.push(RequestMessage {
+                    role: "assistant".into(),
+                    content: None,
+                    tool_call_id: None,
+                    name: None,
+                    tool_calls: Some(vec![serde_json::json!({
+                        "id": tcid,
+                        "type": "function",
+                        "function": {
+                            "name": fc.name,
+                            "arguments": fc.arguments,
+                        }
+                    })]),
+                });
+                messages.push(RequestMessage {
+                    role: "tool".into(),
+                    content: Some(result),
+                    tool_call_id: Some(tcid),
+                    name: None,
+                    tool_calls: None,
+                });
+
+                println!();
+            }
+            Ok(StreamOutcome::Complete(content)) => {
+                let clean = content
+                    .replace("<|FunctionCallBegin|>", "")
+                    .replace("<|FunctionCallEnd|>", "")
+                    .trim()
+                    .to_string();
+                messages.push(RequestMessage {
+                    role: "assistant".into(),
+                    content: Some(clean.clone()),
+                    tool_call_id: None,
+                    name: None,
+                    tool_calls: None,
+                });
+                // AI 回答结束后空一行，与下一问题分隔
+                println!();
+                return Ok(clean);
+            }
+            Err(e) => return Err(e),
+        }
+    }
+}
+
+// ============================================================
 // REPL 交互循环
 // ============================================================
 
@@ -762,6 +849,7 @@ fn print_repl_help() {
     println!("  [\x1b[34m/truncate\x1b[0m]       清除历史，开始新话题");
     println!("  [\x1b[34m/model\x1b[0m]           列出可用模型");
     println!("  [\x1b[34m/model\x1b[0m] <name>    切换到指定模型");
+    println!("  [\x1b[34m/yolo\x1b[0m]           开/关命令免确认（YOLO）模式");
     println!("  [\x1b[34mCtrl+D\x1b[0m]         空输入时退出对话");
     println!("╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌");
 }
@@ -927,8 +1015,14 @@ fn trim_context(messages: &[RequestMessage]) -> Vec<RequestMessage> {
 }
 
 /// 启动 AI 交互式 REPL
-pub fn run_repl(initial: AiProvider, all_providers: &mut Vec<AiProvider>) -> Result<(), String> {
+pub fn run_repl(
+    initial: AiProvider,
+    all_providers: &mut Vec<AiProvider>,
+    yolo: bool,
+) -> Result<(), String> {
     let mut current = initial;
+    // 会话内 YOLO 状态：可由 /yolo 命令切换；初始值来自 --yolo 参数
+    let mut yolo = yolo;
     let key = current.api_key.trim();
     if key.is_empty() || key.contains("your-api-key") {
         eprintln!("⚠ API 密钥未配置或为占位符");
@@ -946,11 +1040,15 @@ pub fn run_repl(initial: AiProvider, all_providers: &mut Vec<AiProvider>) -> Res
     });
 
     println!("\n🤖 WOMAN AI · \x1b[38;5;208m{}\x1b[0m", current.name);
-    println!("💡 输入 [\x1b[34m/exit\x1b[0m] 退出（或空输入 Ctrl+D） · [\x1b[34m/help\x1b[0m] 查看帮助\n");
+    println!("💡 [/exit] 退出 · [/help] 查看帮助");
+    if yolo {
+        println!("\x1b[33m⚡ YOLO 模式\x1b[0m");
+    }
+    println!();
 
     loop {
         // 进入多行编辑器读取输入（raw 模式，支持斜杠候选抽屉、Ctrl+J 换行）
-        let line = match crate::editor::read_input() {
+        let line = match crate::editor::read_input(yolo) {
             Some(l) => l,
             None => {
                 println!("\n再见！");
@@ -1006,6 +1104,14 @@ pub fn run_repl(initial: AiProvider, all_providers: &mut Vec<AiProvider>) -> Res
                         }
                     }
                 }
+                "/yolo" => {
+                    yolo = !yolo;
+                    if yolo {
+                        println!("\x1b[33m⚡ YOLO 模式\x1b[0m");
+                    } else {
+                        println!("\x1b[2m🛡 确认模式\x1b[0m");
+                    }
+                }
                 _ => println!("未知命令：{line}。输入 /help 查看可用命令。"),
             }
             continue;
@@ -1023,71 +1129,10 @@ pub fn run_repl(initial: AiProvider, all_providers: &mut Vec<AiProvider>) -> Res
         // 用户问题打印之后空一行，让 AI 回应与问题上下分离
         println!();
 
-        // 工具调用循环（流式 SSE）
-        loop {
-            // 每次请求前做上下文裁剪，控制 token 增长
-            match chat_completion_stream(&current, &trim_context(&messages)) {
-                Ok(StreamOutcome::ToolCall { fc, tool_call_id }) => {
-                    // 从 arguments 中提取 command 参数
-                    let cmd = serde_json::from_str::<serde_json::Value>(&fc.arguments)
-                        .ok()
-                        .and_then(|v| v["command"].as_str().map(|s| s.to_string()))
-                        .unwrap_or_else(|| fc.arguments.trim_matches('"').to_string());
-
-                    println!("\x1b[2m\x1b[38;5;244m$ {}\x1b[0m", cmd);
-                    let result = run_bash(&cmd);
-                    if !result.is_empty() {
-                        println!("\x1b[2m\x1b[38;5;244m{}\x1b[0m", truncate_output(&result));
-                    }
-
-                    let tcid = tool_call_id.unwrap_or_else(|| "call_0".to_string());
-                    messages.push(RequestMessage {
-                        role: "assistant".into(),
-                        content: None,
-                        tool_call_id: None,
-                        name: None,
-                        tool_calls: Some(vec![serde_json::json!({
-                            "id": tcid,
-                            "type": "function",
-                            "function": {
-                                "name": fc.name,
-                                "arguments": fc.arguments,
-                            }
-                        })]),
-                    });
-                    messages.push(RequestMessage {
-                        role: "tool".into(),
-                        content: Some(result),
-                        tool_call_id: Some(tcid),
-                        name: None,
-                        tool_calls: None,
-                    });
-
-                    println!();
-                }
-                Ok(StreamOutcome::Complete(content)) => {
-                    let clean = content
-                        .replace("<|FunctionCallBegin|>", "")
-                        .replace("<|FunctionCallEnd|>", "")
-                        .trim()
-                        .to_string();
-                    messages.push(RequestMessage {
-                        role: "assistant".into(),
-                        content: Some(clean),
-                        tool_call_id: None,
-                        name: None,
-                        tool_calls: None,
-                    });
-                    // AI 回答结束后空一行，与下一问题分隔
-                    println!();
-                    break;
-                }
-                Err(e) => {
-                    eprintln!("\x1b[2m⚠ API 错误：{e}\x1b[0m");
-                    messages.pop();
-                    break;
-                }
-            }
+        // 工具调用循环（流式 SSE）；失败时回滚本次提问
+        if let Err(e) = agent_tool_loop(&current, &mut messages, yolo) {
+            eprintln!("\x1b[2m⚠ API 错误：{e}\x1b[0m");
+            messages.pop();
         }
     }
 
